@@ -939,17 +939,11 @@ func (s *Server) handleMoveApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Save new order
-	err := s.DB.Transaction(func(tx *gorm.DB) error {
-		for i := range appsList {
-			if appsList[i].Order != i {
-				if _, err := gorm.G[data.App](tx).Where("id = ?", appsList[i].ID).Update(r.Context(), "order", i); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	})
+	installationIDs := make([]string, 0, len(appsList))
+	for _, orderedApp := range appsList {
+		installationIDs = append(installationIDs, orderedApp.Iname)
+	}
+	_, err := s.reorderInstallations(r.Context(), device.ID, installationIDs)
 	if err != nil {
 		slog.Error("Failed to update app order", "error", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -1091,17 +1085,11 @@ func (s *Server) handleReorderApps(w http.ResponseWriter, r *http.Request) {
 		appsList[targetIdx] = app
 	}
 
-	// Save new order
-	err := s.DB.Transaction(func(tx *gorm.DB) error {
-		for i := range appsList {
-			if appsList[i].Order != i {
-				if _, err := gorm.G[data.App](tx).Where("id = ?", appsList[i].ID).Update(r.Context(), "order", i); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	})
+	installationIDs := make([]string, 0, len(appsList))
+	for _, orderedApp := range appsList {
+		installationIDs = append(installationIDs, orderedApp.Iname)
+	}
+	_, err := s.reorderInstallations(r.Context(), device.ID, installationIDs)
 	if err != nil {
 		slog.Error("Failed to update app order", "error", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)

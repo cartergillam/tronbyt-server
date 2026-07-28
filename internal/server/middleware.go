@@ -81,11 +81,6 @@ func (s *Server) APIAuthMiddleware(next http.Handler) http.Handler {
 			}
 		} else {
 			owner, err := gorm.G[data.User](s.DB).
-				Preload("Devices", func(db gorm.PreloadBuilder) error {
-					db.Order("name ASC")
-					return nil
-				}).
-				Preload("Devices.Apps", orderedAppsPreload).
 				Where("username = ?", device.Username).
 				First(r.Context())
 
@@ -95,6 +90,8 @@ func (s *Server) APIAuthMiddleware(next http.Handler) http.Handler {
 				return
 			}
 
+			// A device key is intentionally narrower than its owner's user key.
+			owner.Devices = []data.Device{device}
 			ctx := context.WithValue(r.Context(), userContextKey, &owner)
 			ctx = context.WithValue(ctx, deviceContextKey, &device)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -168,8 +165,8 @@ func (s *Server) RequireDevice(next http.HandlerFunc) http.HandlerFunc {
 				next.ServeHTTP(w, r)
 				return
 			}
-			// If authorized via Device Key X, but asking for Device Y, deny.
-			http.Error(w, "Forbidden: Device Key mismatch", http.StatusForbidden)
+			// Do not disclose whether a device outside this device-key scope exists.
+			http.Error(w, "Device not found", http.StatusNotFound)
 			return
 		}
 

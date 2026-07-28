@@ -1,0 +1,864 @@
+package server
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"maps"
+	"mime"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"tronbyt-server/internal/apps"
+	"tronbyt-server/internal/data"
+	"tronbyt-server/internal/renderer"
+
+	securejoin "github.com/cyphar/filepath-securejoin"
+	"gorm.io/gorm"
+)
+
+const mobileAPIMaxBody = 1 << 20
+
+type apiError struct {
+	Error apiErrorDetail `json:"error"`
+}
+
+type apiErrorDetail struct {
+	Code    string            `json:"code"`
+	Message string            `json:"message"`
+	Fields  map[string]string `json:"fields,omitempty"`
+}
+
+func writeAPIError(w http.ResponseWriter, status int, code, message string, fields map[string]string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(apiError{Error: apiErrorDetail{Code: code, Message: message, Fields: fields}})
+}
+
+func decodeAPIJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeAPIError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json", nil)
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, mobileAPIMaxBody)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_json", "Request body is not valid JSON", nil)
+		return false
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeAPIError(w, http.StatusBadRequest, "invalid_json", "Request body must contain one JSON value", nil)
+		return false
+	}
+	return true
+}
+
+type normalizedSchema struct {
+	Version string                  `json:"version"`
+	Fields  []normalizedSchemaField `json:"fields"`
+}
+
+type normalizedSchemaField struct {
+	Key         string                   `json:"key"`
+	Title       string                   `json:"title"`
+	Description string                   `json:"description,omitempty"`
+	Type        string                   `json:"type"`
+	Required    bool                     `json:"required"`
+	Default     any                      `json:"default,omitempty"`
+	Minimum     *float64                 `json:"minimum,omitempty"`
+	Maximum     *float64                 `json:"maximum,omitempty"`
+	Options     []normalizedSchemaOption `json:"options,omitempty"`
+	Secret      bool                     `json:"secret"`
+	Order       int                      `json:"order"`
+	Visibility  any                      `json:"visibility,omitempty"`
+	SourceType  string                   `json:"sourceType,omitempty"`
+}
+
+type normalizedSchemaOption struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+}
+
+type pixletSchemaEnvelope struct {
+	Version string                  `json:"version"`
+	Schema  []pixletSchemaFieldJSON `json:"schema"`
+}
+
+type pixletSchemaFieldJSON struct {
+	Type        string                   `json:"type"`
+	ID          string                   `json:"id"`
+	Name        string                   `json:"name"`
+	Description string                   `json:"description"`
+	Default     any                      `json:"default"`
+	Options     []pixletSchemaOptionJSON `json:"options"`
+	Secret      bool                     `json:"secret"`
+	Visibility  any                      `json:"visibility"`
+	Required    bool                     `json:"required"`
+	Minimum     *float64                 `json:"minimum"`
+	Maximum     *float64                 `json:"maximum"`
+}
+
+type pixletSchemaOptionJSON struct {
+	Display string `json:"display"`
+	Text    string `json:"text"`
+	Value   string `json:"value"`
+}
+
+func normalizeFieldType(source string, secret bool) string {
+	if secret {
+		return "secret"
+	}
+	switch strings.ToLower(source) {
+	case "onoff", "boolean", "bool", "toggle":
+		return "boolean"
+	case "dropdown", "radio", "enum", "select", "typeahead", "locationbased":
+		return "enum"
+	case "integer", "int":
+		return "integer"
+	case "number", "float":
+		return "number"
+	case "color", "colour":
+		return "colour"
+	case "location":
+		return "location"
+	case "datetime", "date", "time":
+		return strings.ToLower(source)
+	case "text", "string", "oauth1", "oauth2":
+		return "string"
+	case "png":
+		return "image"
+	case "generated":
+		return "group"
+	default:
+		return strings.ToLower(source)
+	}
+}
+
+func normalizeDefault(field pixletSchemaFieldJSON, typ string) any {
+	if field.Default == nil {
+		return nil
+	}
+	if typ == "boolean" {
+		switch value := field.Default.(type) {
+		case bool:
+			return value
+		case string:
+			parsed, err := strconv.ParseBool(value)
+			if err == nil {
+				return parsed
+			}
+		}
+	}
+	return field.Default
+}
+
+func normalizeSchemaBytes(raw []byte) (normalizedSchema, error) {
+	if len(raw) == 0 {
+		return normalizedSchema{Version: "1", Fields: []normalizedSchemaField{}}, nil
+	}
+	var source pixletSchemaEnvelope
+	if err := json.Unmarshal(raw, &source); err != nil {
+		return normalizedSchema{}, fmt.Errorf("decode schema: %w", err)
+	}
+	if source.Version == "" {
+		source.Version = "1"
+	}
+	result := normalizedSchema{Version: source.Version, Fields: make([]normalizedSchemaField, 0, len(source.Schema))}
+	for i, field := range source.Schema {
+		typ := normalizeFieldType(field.Type, field.Secret)
+		options := make([]normalizedSchemaOption, 0, len(field.Options))
+		for _, option := range field.Options {
+			label := option.Display
+			if label == "" {
+				label = option.Text
+			}
+			options = append(options, normalizedSchemaOption{Label: label, Value: option.Value})
+		}
+		result.Fields = append(result.Fields, normalizedSchemaField{
+			Key: field.ID, Title: field.Name, Description: field.Description,
+			Type: typ, Required: field.Required, Default: normalizeDefault(field, typ),
+			Minimum: field.Minimum, Maximum: field.Maximum, Options: options,
+			Secret: field.Secret, Order: i, Visibility: field.Visibility, SourceType: field.Type,
+		})
+	}
+	return result, nil
+}
+
+type catalogueApp struct {
+	ID                  string            `json:"id"`
+	Name                string            `json:"name"`
+	Description         string            `json:"description"`
+	Author              string            `json:"author"`
+	Category            string            `json:"category,omitempty"`
+	Tags                []string          `json:"tags"`
+	Repository          string            `json:"repository"`
+	IconURL             *string           `json:"iconURL"`
+	Configurable        bool              `json:"configurable"`
+	Compatible          *bool             `json:"compatible"`
+	Published           string            `json:"published,omitempty"`
+	Updated             string            `json:"updated,omitempty"`
+	RecommendedInterval int               `json:"recommendedRenderIntervalMin,omitempty"`
+	Schema              *normalizedSchema `json:"schema,omitempty"`
+	meta                apps.AppMetadata
+}
+
+func nonNilStrings(value []string) []string {
+	if value == nil {
+		return []string{}
+	}
+	return value
+}
+
+func (s *Server) catalogueForUser(user *data.User) []catalogueApp {
+	var result []catalogueApp
+	appendMetadata := func(meta apps.AppMetadata, repository string) {
+		description := meta.Desc
+		if description == "" {
+			description = meta.Summary
+		}
+		var icon *string
+		if meta.Preview != "" || meta.Preview2x != "" {
+			value := "/v0/catalogue/" + url.PathEscape(meta.ID) + "/icon"
+			icon = &value
+		}
+		configurable := !strings.EqualFold(filepath.Ext(meta.FileName), ".webp")
+		result = append(result, catalogueApp{
+			ID: meta.ID, Name: meta.Name, Description: description, Author: meta.Author,
+			Category: meta.Category, Tags: nonNilStrings(meta.Tags), Repository: repository,
+			IconURL: icon, Configurable: configurable, Published: meta.Published, Updated: meta.Updated,
+			RecommendedInterval: meta.RecommendedInterval, meta: meta,
+		})
+	}
+	for _, meta := range s.ListSystemApps() {
+		appendMetadata(meta, "system")
+	}
+	if user != nil {
+		for _, meta := range apps.ListUserApps(s.DataDir, user.Username) {
+			repository := "custom"
+			if strings.Contains(filepath.ToSlash(meta.Path), "/repo/apps/") {
+				repository = "custom-repository"
+			}
+			appendMetadata(meta, repository)
+		}
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		left, right := strings.ToLower(result[i].Name), strings.ToLower(result[j].Name)
+		if left == right {
+			if result[i].Repository == result[j].Repository {
+				return result[i].ID < result[j].ID
+			}
+			return result[i].Repository < result[j].Repository
+		}
+		return left < right
+	})
+	return result
+}
+
+func (s *Server) findCatalogueApp(user *data.User, id string) (*catalogueApp, error) {
+	for _, item := range s.catalogueForUser(user) {
+		if item.ID == id {
+			copy := item
+			return &copy, nil
+		}
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
+func (s *Server) catalogueAppPath(item *catalogueApp) (string, error) {
+	path := item.meta.Path
+	if item.Repository == "system" {
+		path = filepath.Join(path, item.meta.FileName)
+	}
+	return securejoin.SecureJoin(s.DataDir, path)
+}
+
+func (s *Server) loadNormalizedSchema(ctx context.Context, item *catalogueApp, supports2x bool) (normalizedSchema, error) {
+	path, err := s.catalogueAppPath(item)
+	if err != nil {
+		return normalizedSchema{}, err
+	}
+	if strings.EqualFold(filepath.Ext(path), ".webp") {
+		return normalizedSchema{Version: "1", Fields: []normalizedSchemaField{}}, nil
+	}
+	raw, err := renderer.GetSchema(ctx, path, 64, 32, supports2x)
+	if err != nil {
+		return normalizedSchema{}, err
+	}
+	return normalizeSchemaBytes(raw)
+}
+
+func (s *Server) handleMobilePreview(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+	image, app, err := s.GetCurrentAppImage(r.Context(), device)
+	if err != nil || len(image) == 0 {
+		writeAPIError(w, http.StatusNotFound, "preview_not_found", "No rendered preview is available for this device", nil)
+		return
+	}
+	sum := sha256.Sum256(image)
+	etag := `"` + hex.EncodeToString(sum[:]) + `"`
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "no-cache")
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	modified := app.LastSuccessfulRender
+	if modified == nil && !app.LastRender.IsZero() {
+		modified = &app.LastRender
+	}
+	if modified != nil {
+		w.Header().Set("Last-Modified", modified.UTC().Format(http.TimeFormat))
+	}
+	w.Header().Set("Content-Type", "image/webp")
+	w.Header().Set("Content-Length", strconv.Itoa(len(image)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(image)
+}
+
+func (s *Server) handleCatalogueList(w http.ResponseWriter, r *http.Request) {
+	items := s.catalogueForUser(GetUser(r))
+	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("search")))
+	category := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("category")))
+	repository := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("repository")))
+	filtered := make([]catalogueApp, 0, len(items))
+	for _, item := range items {
+		if search != "" && !strings.Contains(strings.ToLower(item.Name+" "+item.Description+" "+item.Author+" "+strings.Join(item.Tags, " ")), search) {
+			continue
+		}
+		if category != "" && strings.ToLower(item.Category) != category {
+			continue
+		}
+		if repository != "" && strings.ToLower(item.Repository) != repository {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	offset := 0
+	if value := r.URL.Query().Get("offset"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid_offset", "offset must be a non-negative integer", nil)
+			return
+		}
+		offset = parsed
+	}
+	if offset < 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid_offset", "offset must be non-negative", nil)
+		return
+	}
+	limit := 50
+	if value := r.URL.Query().Get("limit"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 || parsed > 200 {
+			writeAPIError(w, http.StatusBadRequest, "invalid_limit", "limit must be between 1 and 200", nil)
+			return
+		}
+		limit = parsed
+	}
+	total := len(filtered)
+	if offset > total {
+		offset = total
+	}
+	end := min(offset+limit, total)
+	var nextOffset *int
+	if end < total {
+		value := end
+		nextOffset = &value
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"apps": filtered[offset:end], "offset": offset, "limit": limit, "total": total, "nextOffset": nextOffset})
+}
+
+func (s *Server) handleCatalogueDetail(w http.ResponseWriter, r *http.Request) {
+	item, err := s.findCatalogueApp(GetUser(r), r.PathValue("appID"))
+	if err != nil {
+		writeAPIError(w, http.StatusNotFound, "app_not_found", "Catalogue app not found", nil)
+		return
+	}
+	supports2x := false
+	if device, err := DeviceFromContext(r.Context()); err == nil {
+		supports2x = device.Type.Supports2x()
+		value := true
+		item.Compatible = &value
+	}
+	schema, err := s.loadNormalizedSchema(r.Context(), item, supports2x)
+	if err != nil {
+		slog.Error("Failed to load catalogue detail schema", "app_id", item.ID, "error", err)
+		writeAPIError(w, http.StatusBadGateway, "schema_unavailable", "App schema could not be loaded", nil)
+		return
+	}
+	item.Schema = &schema
+	item.Configurable = len(schema.Fields) > 0
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(item)
+}
+
+func (s *Server) handleCatalogueSchema(w http.ResponseWriter, r *http.Request) {
+	item, err := s.findCatalogueApp(GetUser(r), r.PathValue("appID"))
+	if err != nil {
+		writeAPIError(w, http.StatusNotFound, "app_not_found", "Catalogue app not found", nil)
+		return
+	}
+	supports2x := false
+	if device, err := DeviceFromContext(r.Context()); err == nil {
+		supports2x = device.Type.Supports2x()
+	}
+	schema, err := s.loadNormalizedSchema(r.Context(), item, supports2x)
+	if err != nil {
+		slog.Error("Failed to load catalogue schema", "app_id", item.ID, "error", err)
+		writeAPIError(w, http.StatusBadGateway, "schema_unavailable", "App schema could not be loaded", nil)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	_ = json.NewEncoder(w).Encode(schema)
+}
+
+func (s *Server) handleCatalogueIcon(w http.ResponseWriter, r *http.Request) {
+	item, err := s.findCatalogueApp(GetUser(r), r.PathValue("appID"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	file := item.meta.Preview
+	if item.meta.Supports2x && item.meta.Preview2x != "" {
+		file = item.meta.Preview2x
+	}
+	if file == "" {
+		http.NotFound(w, r)
+		return
+	}
+	path, err := securejoin.SecureJoin(filepath.Join(s.DataDir, filepath.Dir(item.meta.Path)), file)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, path)
+}
+
+func findSchemaField(schema normalizedSchema, key string) *normalizedSchemaField {
+	for i := range schema.Fields {
+		if schema.Fields[i].Key == key {
+			return &schema.Fields[i]
+		}
+	}
+	return nil
+}
+
+func normalizeConfigValue(field *normalizedSchemaField, value any) (any, error) {
+	switch field.Type {
+	case "boolean":
+		switch typed := value.(type) {
+		case bool:
+			return strconv.FormatBool(typed), nil
+		case string:
+			if _, err := strconv.ParseBool(typed); err == nil {
+				return strings.ToLower(typed), nil
+			}
+		}
+		return nil, errors.New("must be a boolean")
+	case "integer":
+		number, ok := value.(float64)
+		if !ok || number != float64(int64(number)) {
+			return nil, errors.New("must be an integer")
+		}
+		if field.Minimum != nil && number < *field.Minimum || field.Maximum != nil && number > *field.Maximum {
+			return nil, errors.New("is outside the allowed range")
+		}
+		return int64(number), nil
+	case "number":
+		number, ok := value.(float64)
+		if !ok {
+			return nil, errors.New("must be a number")
+		}
+		if field.Minimum != nil && number < *field.Minimum || field.Maximum != nil && number > *field.Maximum {
+			return nil, errors.New("is outside the allowed range")
+		}
+		return number, nil
+	case "enum":
+		text, ok := value.(string)
+		if !ok {
+			return nil, errors.New("must be a string")
+		}
+		for _, option := range field.Options {
+			if option.Value == text {
+				return text, nil
+			}
+		}
+		return nil, errors.New("is not an allowed option")
+	case "string", "secret", "colour", "date", "time", "datetime":
+		if _, ok := value.(string); !ok {
+			return nil, errors.New("must be a string")
+		}
+	}
+	return value, nil
+}
+
+func validateConfigPatch(schema normalizedSchema, existing, patch map[string]any) (map[string]any, map[string]string) {
+	result := make(map[string]any, len(existing)+len(patch))
+	for key, value := range existing {
+		result[key] = value
+	}
+	fieldErrors := map[string]string{}
+	for key, value := range patch {
+		field := findSchemaField(schema, key)
+		if field == nil {
+			fieldErrors[key] = "unknown configuration field"
+			continue
+		}
+		if field.Secret && value == nil {
+			continue
+		}
+		if marker, ok := value.(map[string]any); ok && field.Secret && marker["keepExisting"] == true {
+			continue
+		}
+		normalized, err := normalizeConfigValue(field, value)
+		if err != nil {
+			fieldErrors[key] = err.Error()
+			continue
+		}
+		result[key] = normalized
+	}
+	for _, field := range schema.Fields {
+		if field.Required {
+			if value, ok := result[field.Key]; !ok || value == nil || value == "" {
+				fieldErrors[field.Key] = "is required"
+			}
+		}
+	}
+	return result, fieldErrors
+}
+
+func sanitizeConfig(schema normalizedSchema, config map[string]any) (map[string]any, map[string]bool) {
+	values := make(map[string]any)
+	secrets := make(map[string]bool)
+	for key, value := range config {
+		field := findSchemaField(schema, key)
+		if field != nil && field.Secret {
+			secrets[key] = value != nil && value != ""
+			continue
+		}
+		if field != nil && field.Type == "boolean" {
+			if text, ok := value.(string); ok {
+				if parsed, err := strconv.ParseBool(text); err == nil {
+					value = parsed
+				}
+			}
+		}
+		values[key] = value
+	}
+	return values, secrets
+}
+
+func schemaDefaults(schema normalizedSchema) map[string]any {
+	defaults := make(map[string]any)
+	for i := range schema.Fields {
+		field := &schema.Fields[i]
+		if field.Default == nil || field.Secret {
+			continue
+		}
+		value, err := normalizeConfigValue(field, field.Default)
+		if err == nil {
+			defaults[field.Key] = value
+		}
+	}
+	return defaults
+}
+
+func (s *Server) installationAndSchema(ctx context.Context, device *data.Device, installationID string) (*data.App, normalizedSchema, error) {
+	app := device.GetApp(installationID)
+	if app == nil || app.DeviceID != device.ID || app.Path == nil || app.Pushed {
+		return nil, normalizedSchema{}, gorm.ErrRecordNotFound
+	}
+	path := filepath.ToSlash(*app.Path)
+	item := &catalogueApp{
+		Repository: "custom",
+		meta: apps.AppMetadata{
+			Path: path,
+			Manifest: apps.Manifest{
+				ID:       app.Name,
+				FileName: filepath.Base(path),
+			},
+		},
+	}
+	if strings.HasPrefix(path, "system-apps/") {
+		item.Repository = "system"
+		item.meta.Path = filepath.ToSlash(filepath.Dir(path))
+	}
+	schema, err := s.loadNormalizedSchema(ctx, item, device.Type.Supports2x())
+	return app, schema, err
+}
+
+func (s *Server) installationConfigPayload(device *data.Device, app *data.App, schema normalizedSchema) map[string]any {
+	config, secrets := sanitizeConfig(schema, app.Config)
+	return map[string]any{
+		"installation": s.toAppPayload(device, app),
+		"appID":        app.Name,
+		"schema":       schema,
+		"config":       config,
+		"savedSecrets": secrets,
+	}
+}
+
+func (s *Server) handleInstallationConfigGet(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+	app, schema, err := s.installationAndSchema(r.Context(), device, r.PathValue("installationID"))
+	if err != nil {
+		writeAPIError(w, http.StatusNotFound, "installation_not_found", "Installation not found", nil)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.installationConfigPayload(device, app, schema))
+}
+
+func (s *Server) renderInstallation(ctx context.Context, device *data.Device, app *data.App, config map[string]any) ([]byte, error) {
+	path, err := securejoin.SecureJoin(s.DataDir, *app.Path)
+	if err != nil {
+		return nil, err
+	}
+	// RenderApp injects legacy runtime values such as $tz into its config map.
+	// Render a clone so those values are never persisted as user configuration.
+	image, _, err := s.RenderApp(ctx, device, app, path, maps.Clone(config))
+	return image, err
+}
+
+func (s *Server) saveRenderedInstallationImage(device *data.Device, app *data.App, image []byte) error {
+	dir, err := s.ensureDeviceImageDir(device.ID)
+	if err != nil {
+		return err
+	}
+	path, err := securejoin.SecureJoin(dir, fmt.Sprintf("%s-%s.webp", app.Name, app.Iname))
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, image, 0644)
+}
+
+func (s *Server) handleInstallationConfigPatch(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+	app, schema, err := s.installationAndSchema(r.Context(), device, r.PathValue("installationID"))
+	if err != nil {
+		writeAPIError(w, http.StatusNotFound, "installation_not_found", "Installation not found", nil)
+		return
+	}
+	var request struct {
+		Config map[string]any `json:"config"`
+	}
+	if !decodeAPIJSON(w, r, &request) {
+		return
+	}
+	updated, fieldErrors := validateConfigPatch(schema, app.Config, request.Config)
+	if len(fieldErrors) > 0 {
+		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_config", "Configuration validation failed", fieldErrors)
+		return
+	}
+	image, err := s.renderInstallation(r.Context(), device, app, updated)
+	if err != nil {
+		writeAPIError(w, http.StatusUnprocessableEntity, "render_failed", "Configuration could not be rendered", nil)
+		return
+	}
+	now := time.Now()
+	err = s.DB.Transaction(func(tx *gorm.DB) error {
+		update := data.App{
+			Config: updated, LastRender: now,
+			EmptyLastRender: len(image) == 0,
+		}
+		fields := []string{"Config", "LastRender", "EmptyLastRender"}
+		if len(image) > 0 {
+			update.LastSuccessfulRender = &now
+			fields = append(fields, "LastSuccessfulRender")
+		}
+		if err := tx.Model(&data.App{ID: app.ID}).Select(fields).Updates(update).Error; err != nil {
+			return err
+		}
+		if len(image) > 0 {
+			return s.saveRenderedInstallationImage(device, app, image)
+		}
+		return nil
+	})
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "save_failed", "Configuration could not be saved", nil)
+		return
+	}
+	app.Config, app.LastRender, app.EmptyLastRender = updated, now, len(image) == 0
+	if len(image) > 0 {
+		app.LastSuccessfulRender = &now
+	}
+	s.notifyDashboard(GetUser(r).Username, WSEvent{Type: "apps_changed", DeviceID: device.ID})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.installationConfigPayload(device, app, schema))
+}
+
+type installationCreateRequest struct {
+	AppID             string         `json:"appID"`
+	Name              string         `json:"name"`
+	Config            map[string]any `json:"config"`
+	Enabled           *bool          `json:"enabled"`
+	DisplayTimeSec    int            `json:"displayTimeSec"`
+	RenderIntervalMin int            `json:"renderIntervalMin"`
+}
+
+func (s *Server) handleInstallationCreate(w http.ResponseWriter, r *http.Request) {
+	device, user := GetDevice(r), GetUser(r)
+	var request installationCreateRequest
+	if !decodeAPIJSON(w, r, &request) {
+		return
+	}
+	item, err := s.findCatalogueApp(user, request.AppID)
+	if err != nil {
+		writeAPIError(w, http.StatusNotFound, "app_not_found", "Catalogue app not found", nil)
+		return
+	}
+	if request.RenderIntervalMin < 1 || request.RenderIntervalMin > 1440 || request.DisplayTimeSec < 1 || request.DisplayTimeSec > 3600 {
+		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_timing", "renderIntervalMin must be 1...1440 and displayTimeSec must be 1...3600", nil)
+		return
+	}
+	path, err := s.catalogueAppPath(item)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_app", "Catalogue app path is invalid", nil)
+		return
+	}
+	relativePath, err := filepath.Rel(s.DataDir, path)
+	if err != nil || strings.HasPrefix(relativePath, "..") {
+		writeAPIError(w, http.StatusBadRequest, "invalid_app", "Catalogue app path is invalid", nil)
+		return
+	}
+	duplicate, err := gorm.G[data.App](s.DB).Where("device_id = ? AND path = ?", device.ID, relativePath).Count(r.Context(), "*")
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "database_error", "Installation state could not be checked", nil)
+		return
+	}
+	if duplicate > 0 {
+		writeAPIError(w, http.StatusConflict, "duplicate_installation", "This app is already installed on the device", nil)
+		return
+	}
+	schema, err := s.loadNormalizedSchema(r.Context(), item, device.Type.Supports2x())
+	if err != nil {
+		slog.Error("Failed to load installation schema", "app_id", item.ID, "error", err)
+		writeAPIError(w, http.StatusBadGateway, "schema_unavailable", "App schema could not be loaded", nil)
+		return
+	}
+	config, fieldErrors := validateConfigPatch(schema, schemaDefaults(schema), request.Config)
+	if len(fieldErrors) > 0 {
+		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_config", "Configuration validation failed", fieldErrors)
+		return
+	}
+	iname, err := generateUniqueIname(s.DB, device.ID)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "id_generation_failed", "Installation ID could not be generated", nil)
+		return
+	}
+	enabled := true
+	if request.Enabled != nil {
+		enabled = *request.Enabled
+	}
+	app := data.App{
+		DeviceID: device.ID, Iname: iname, Name: item.ID, Path: &relativePath, Config: config,
+		Enabled: enabled, UInterval: request.RenderIntervalMin, DisplayTime: request.DisplayTimeSec,
+	}
+	image, err := s.renderInstallation(r.Context(), device, &app, config)
+	if err != nil {
+		writeAPIError(w, http.StatusUnprocessableEntity, "render_failed", "Initial configuration could not be rendered", nil)
+		return
+	}
+	now := time.Now()
+	app.LastRender, app.EmptyLastRender = now, len(image) == 0
+	if len(image) > 0 {
+		app.LastSuccessfulRender = &now
+	}
+	err = s.DB.Transaction(func(tx *gorm.DB) error {
+		maxOrder, err := getMaxAppOrder(tx, device.ID)
+		if err != nil {
+			return err
+		}
+		app.Order = maxOrder + 1
+		if err := gorm.G[data.App](tx).Create(r.Context(), &app); err != nil {
+			return err
+		}
+		if len(image) > 0 {
+			return s.saveRenderedInstallationImage(device, &app, image)
+		}
+		return nil
+	})
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "installation_failed", "Installation could not be created", nil)
+		return
+	}
+	device.Apps = append(device.Apps, &app)
+	s.notifyDashboard(user.Username, WSEvent{Type: "apps_changed", DeviceID: device.ID})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(s.installationConfigPayload(device, &app, schema))
+}
+
+func (s *Server) reorderInstallations(ctx context.Context, deviceID string, installationIDs []string) ([]*data.App, error) {
+	appsList, err := gorm.G[data.App](s.DB).Where("device_id = ?", deviceID).Find(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(installationIDs) != len(appsList) {
+		return nil, errors.New("all installations must be included")
+	}
+	byID := make(map[string]*data.App, len(appsList))
+	for i := range appsList {
+		byID[appsList[i].Iname] = &appsList[i]
+	}
+	ordered := make([]*data.App, 0, len(installationIDs))
+	seen := make(map[string]bool, len(installationIDs))
+	for _, id := range installationIDs {
+		if seen[id] {
+			return nil, fmt.Errorf("duplicate installation ID %q", id)
+		}
+		seen[id] = true
+		app := byID[id]
+		if app == nil {
+			return nil, fmt.Errorf("installation %q does not belong to this device", id)
+		}
+		ordered = append(ordered, app)
+	}
+	err = s.DB.Transaction(func(tx *gorm.DB) error {
+		for order, app := range ordered {
+			if _, err := gorm.G[data.App](tx).Where("device_id = ? AND id = ?", deviceID, app.ID).Update(ctx, "order", order); err != nil {
+				return err
+			}
+			app.Order = order
+		}
+		return nil
+	})
+	return ordered, err
+}
+
+func (s *Server) handleInstallationOrderPatch(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+	var request struct {
+		InstallationIDs []string `json:"installationIDs"`
+	}
+	if !decodeAPIJSON(w, r, &request) {
+		return
+	}
+	ordered, err := s.reorderInstallations(r.Context(), device.ID, request.InstallationIDs)
+	if err != nil {
+		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_order", err.Error(), nil)
+		return
+	}
+	payloads := make([]AppPayload, 0, len(ordered))
+	for _, app := range ordered {
+		payloads = append(payloads, s.toAppPayload(device, app))
+	}
+	s.notifyDashboard(GetUser(r).Username, WSEvent{Type: "apps_changed", DeviceID: device.ID})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"installationIDs": request.InstallationIDs, "installations": payloads})
+}

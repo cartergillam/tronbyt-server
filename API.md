@@ -10,7 +10,103 @@ All API endpoints require authentication via Bearer token:
 Authorization: Bearer <api-key>
 ```
 
-API keys are generated per-device in the web UI. Each key is scoped to a single device.
+A user API key can access that user's devices. A device API key is restricted to
+that single device, including on `GET /v0/devices`. Catalogue routes are
+server-wide read-only but still require a valid key. New mobile endpoints return
+typed errors:
+
+```json
+{"error":{"code":"invalid_config","message":"Configuration validation failed","fields":{"team":"is not an allowed option"}}}
+```
+
+Mutation requests require `Content-Type: application/json` and are limited to
+1 MiB.
+
+## Current display preview
+
+```http
+GET /v0/devices/{id}/preview
+```
+
+Returns the same current rendered WebP represented by Manager: confirmed
+`displaying_app` when available, otherwise the current legacy rotation index.
+It does not render or advance rotation. The original bytes preserve animation.
+Response headers include `Content-Type`, `Content-Length`, `ETag`,
+`Cache-Control: no-cache`, and `Last-Modified` when render time is known.
+Send `If-None-Match`; an unchanged preview returns `304`. No rendered frame
+returns `404`.
+
+## Catalogue
+
+```http
+GET /v0/catalogue
+GET /v0/catalogue/{appID}
+GET /v0/catalogue/{appID}/schema
+GET /v0/catalogue/{appID}/icon
+```
+
+Listing parameters are `search`, `category`, `repository`, `limit` (1-200,
+default 50), and `offset` (default 0). Ordering is deterministic by
+case-insensitive name, repository, then ID. The envelope contains `apps`,
+`offset`, `limit`, `total`, and nullable `nextOffset`. App source is `system`,
+`custom`, or `custom-repository`. Detail includes a normalized schema when it can
+be loaded; the schema route returns `{version, fields}`. Icon URLs are narrow,
+Bearer-authenticated catalogue assets and never accept file paths.
+
+Normalized fields include `key`, `title`, `description`, `type`, `required`,
+`default`, `minimum`, `maximum`, `options`, `secret`, `order`, `visibility`, and
+the original Pixlet `sourceType` where present.
+
+## Full installation configuration
+
+```http
+GET   /v0/devices/{id}/installations/{installationID}/config
+PATCH /v0/devices/{id}/installations/{installationID}/config
+```
+
+GET returns `installation`, `appID`, `schema`, sanitized `config`, and
+`savedSecrets`. PATCH accepts `{"config":{...}}`, rejects unknown schema fields,
+preserves omitted fields, validates normalized types/options/constraints, renders
+before saving, and returns the same sanitized shape. Secret values are never
+returned. Omit a secret, send `null`, or send `{"keepExisting":true}` to preserve
+its existing value.
+
+## Install a catalogue app
+
+```http
+POST /v0/devices/{id}/installations
+```
+
+```json
+{"appID":"mlb","name":"MLB","config":{},"enabled":true,"displayTimeSec":15,"renderIntervalMin":5}
+```
+
+The app must resolve inside the authenticated user's system/custom catalogue.
+Configuration is validated and initially rendered before persistence. The same
+catalogue path cannot be installed twice on one device. Timing ranges are 1-3600
+seconds and 1-1440 minutes. Success returns `201` and the sanitized
+installation-config payload.
+
+## Reorder installations
+
+```http
+PATCH /v0/devices/{id}/installations/order
+```
+
+```json
+{"installationIDs":["weather-main","mlb-main","clock-main"]}
+```
+
+The list must contain every installation on the device exactly once. Disabled
+apps remain disabled and participate in ordering. Updates are transactional.
+The response returns the authoritative `installationIDs` and installation
+objects.
+
+Existing published `/v0` routes and their historical plain-text errors remain
+compatible; typed errors apply to the mobile extension routes above.
+
+Device keys are generated per device in the web UI and are scoped to that device.
+User keys, where configured, are scoped to all devices owned by that user.
 
 ---
 
