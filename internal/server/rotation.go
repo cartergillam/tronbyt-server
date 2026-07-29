@@ -206,6 +206,23 @@ func (s *Server) GetCurrentAppImage(ctx context.Context, device *data.Device) ([
 }
 
 func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user *data.User) (*data.App, int, error) {
+	// Power-on stages one real installation for predictable restoration before
+	// normal night-mode, pin, and rotation rules resume.
+	if device.DisplayRestoreApp != nil && *device.DisplayRestoreApp != "" {
+		restoreID := *device.DisplayRestoreApp
+		if _, err := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).Update(ctx, "display_restore_app", nil); err != nil {
+			return nil, 0, fmt.Errorf("clear display restore target: %w", err)
+		}
+		device.DisplayRestoreApp = nil
+		for i := range device.Apps {
+			app := device.Apps[i]
+			if app.Iname == restoreID && !app.Pushed && app.Enabled &&
+				s.possiblyRender(ctx, app, device, user) && !app.EmptyLastRender {
+				return app, expandedIndexForInstallation(device, app.Iname), nil
+			}
+		}
+	}
+
 	// 1. Night Mode Logic (Highest Priority)
 	nightModeActive := device.GetNightModeIsActive()
 	if nightModeActive && device.NightModeApp != "" {
@@ -322,6 +339,17 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 	}
 
 	return nil, 0, nil
+}
+
+func expandedIndexForInstallation(device *data.Device, iname string) int {
+	apps := slices.Clone(device.Apps)
+	sort.Slice(apps, func(i, j int) bool { return apps[i].Order < apps[j].Order })
+	for index, app := range createExpandedAppsList(device, apps) {
+		if app.Iname == iname {
+			return index
+		}
+	}
+	return device.LastAppIndex
 }
 
 func createExpandedAppsList(device *data.Device, apps []*data.App) []*data.App {

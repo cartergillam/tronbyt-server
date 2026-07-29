@@ -190,7 +190,7 @@ type AppPayload struct {
 	Pushed            bool   `json:"pushed"`
 	RenderIntervalMin int    `json:"renderIntervalMin"`
 	DisplayTimeSec    int    `json:"displayTimeSec"`
-	LastRenderAt      int64  `json:"lastRenderAt"`
+	LastRenderAt      *int64 `json:"lastRenderAt"`
 	IsInactive        bool   `json:"isInactive"`
 
 	// Schedule fields
@@ -209,6 +209,11 @@ type AppPayload struct {
 
 func (s *Server) toAppPayload(device *data.Device, app *data.App) AppPayload {
 	pinned := device.PinnedApp != nil && *device.PinnedApp == app.Iname
+	var lastRenderAt *int64
+	if !app.LastRender.IsZero() {
+		value := app.LastRender.Unix()
+		lastRenderAt = &value
+	}
 	return AppPayload{
 		ID:                app.Iname,
 		AppID:             app.Name,
@@ -217,7 +222,7 @@ func (s *Server) toAppPayload(device *data.Device, app *data.App) AppPayload {
 		Pushed:            app.Pushed,
 		RenderIntervalMin: app.UInterval,
 		DisplayTimeSec:    app.DisplayTime,
-		LastRenderAt:      app.LastRender.Unix(),
+		LastRenderAt:      lastRenderAt,
 		IsInactive:        app.EmptyLastRender,
 
 		StartTime: app.StartTime,
@@ -418,6 +423,9 @@ func (s *Server) handleListInstallations(w http.ResponseWriter, r *http.Request)
 
 	installations := make([]AppPayload, 0, len(device.Apps))
 	for i := range device.Apps {
+		if device.Apps[i].Pushed {
+			continue
+		}
 		installations = append(installations, s.toAppPayload(device, device.Apps[i]))
 	}
 
@@ -437,7 +445,7 @@ func (s *Server) handleGetInstallation(w http.ResponseWriter, r *http.Request) {
 	device := GetDevice(r)
 
 	app := device.GetApp(iname)
-	if app == nil {
+	if app == nil || app.Pushed {
 		http.Error(w, "App not found", http.StatusNotFound)
 		return
 	}
@@ -648,6 +656,7 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	previousBrightness := int(device.Brightness)
 	if update.Brightness != nil {
 		device.Brightness = data.Brightness(*update.Brightness)
 	}
@@ -735,6 +744,18 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to update device", http.StatusInternalServerError)
 		return
 	}
+	if update.Brightness != nil {
+		switch {
+		case previousBrightness > 0 && *update.Brightness == 0:
+			if err := s.prepareDisplayRestore(r.Context(), device); err != nil {
+				slog.Warn("Failed to prepare display restoration", "device", device.ID, "error", err)
+			}
+		case previousBrightness == 0 && *update.Brightness > 0:
+			if err := s.restoreDisplayAfterPowerOn(r.Context(), device); err != nil {
+				slog.Warn("Failed to restore display after power on", "device", device.ID, "error", err)
+			}
+		}
+	}
 
 	// Notify Dashboard
 	user := GetUser(r)
@@ -773,7 +794,7 @@ func (s *Server) handlePatchInstallation(w http.ResponseWriter, r *http.Request)
 	device := GetDevice(r)
 
 	app := device.GetApp(iname)
-	if app == nil {
+	if app == nil || app.Pushed {
 		http.Error(w, "App not found", http.StatusNotFound)
 		return
 	}
@@ -932,6 +953,7 @@ func (s *Server) handleDeleteInstallationAPI(w http.ResponseWriter, r *http.Requ
 	device := GetDevice(r)
 
 	// First try to find the app by iname (server-generated ID)
+	foundByPushedPath := false
 	app, err := gorm.G[data.App](s.DB).Where("device_id = ? AND iname = ?", device.ID, installID).First(r.Context())
 	if err != nil {
 		// If not found by iname, try to find by installationID (stored in path as "pushed:{installationID}")
@@ -940,12 +962,41 @@ func (s *Server) handleDeleteInstallationAPI(w http.ResponseWriter, r *http.Requ
 			http.Error(w, "App not found", http.StatusNotFound)
 			return
 		}
+		foundByPushedPath = true
+	}
+	if app.Pushed && !foundByPushedPath {
+		writeAPIError(w, http.StatusUnprocessableEntity, "temporary_installation", "Temporary pushed content cannot be deleted as an installation", nil)
+		return
 	}
 
 	// Delete the app
 	if _, err := gorm.G[data.App](s.DB).Where("id = ?", app.ID).Delete(r.Context()); err != nil {
 		http.Error(w, "Failed to delete app", http.StatusInternalServerError)
 		return
+	}
+	var deviceFields []string
+	if device.PinnedApp != nil && *device.PinnedApp == app.Iname {
+		device.PinnedApp = nil
+		deviceFields = append(deviceFields, "PinnedApp")
+	}
+	if device.DisplayingApp != nil && *device.DisplayingApp == app.Iname {
+		device.DisplayingApp = nil
+		deviceFields = append(deviceFields, "DisplayingApp")
+	}
+	if device.DisplayRestoreApp != nil && *device.DisplayRestoreApp == app.Iname {
+		device.DisplayRestoreApp = nil
+		deviceFields = append(deviceFields, "DisplayRestoreApp")
+	}
+	if len(deviceFields) > 0 {
+		if _, err := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).
+			Select("PinnedApp", "DisplayingApp", "DisplayRestoreApp").Updates(r.Context(), data.Device{
+			PinnedApp:         device.PinnedApp,
+			DisplayingApp:     device.DisplayingApp,
+			DisplayRestoreApp: device.DisplayRestoreApp,
+		}); err != nil {
+			http.Error(w, "Failed to clear deleted app state", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Clean up files using the actual iname

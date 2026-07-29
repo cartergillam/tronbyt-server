@@ -146,6 +146,84 @@ func TestDeviceKeyListsOnlyAuthorizedDevice(t *testing.T) {
 	assert.Equal(t, "testdevice", payload.Devices[0].ID)
 }
 
+func TestInstalledAppsExcludeTemporaryPushedContent(t *testing.T) {
+	s := newTestServerAPI(t)
+	ctx := context.Background()
+	path := "system-apps/apps/clock/clock.star"
+	appsToCreate := []data.App{
+		{DeviceID: "testdevice", Iname: "clock-main", Name: "clock", Path: &path, Enabled: true, Order: 0},
+		{DeviceID: "testdevice", Iname: "102", Name: "pushed", Pushed: true, Enabled: true, Order: 1},
+	}
+	for i := range appsToCreate {
+		require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &appsToCreate[i]))
+	}
+
+	req := newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations", "device_api_key", nil)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Body.String(), `"id":"clock-main"`)
+	assert.NotContains(t, rr.Body.String(), `"id":"102"`)
+	assert.Contains(t, rr.Body.String(), `"lastRenderAt":null`)
+
+	req = newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations/102", "device_api_key", nil)
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+func TestDisplayPowerOnRestoresClockAndNeverPushedContent(t *testing.T) {
+	s := newTestServerAPI(t)
+	ctx := context.Background()
+	clockPath := "system-apps/apps/clock/clock.star"
+	firstPath := "system-apps/apps/weather/weather.star"
+	pushedPath := "pushed:side-eye"
+	appsToCreate := []data.App{
+		{DeviceID: "testdevice", Iname: "weather", Name: "weather", Path: &firstPath, Enabled: true, Order: 0},
+		{DeviceID: "testdevice", Iname: "clock-main", Name: "clock", Path: &clockPath, Enabled: true, Order: 1},
+		{DeviceID: "testdevice", Iname: "999", Name: "pushed", Path: &pushedPath, Pushed: true, Enabled: true, Order: 2},
+	}
+	for i := range appsToCreate {
+		require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &appsToCreate[i]))
+	}
+	_, err := gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").Updates(ctx, data.Device{
+		Brightness:    70,
+		DisplayingApp: new("999"),
+	})
+	require.NoError(t, err)
+
+	req := newAPIRequest(http.MethodPatch, "/v0/devices/testdevice", "device_api_key", []byte(`{"brightness":0}`))
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	device, err := gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").First(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, device.DisplayRestoreApp)
+	assert.Equal(t, "clock-main", *device.DisplayRestoreApp)
+	assert.Nil(t, device.DisplayingApp)
+
+	req = newAPIRequest(http.MethodPatch, "/v0/devices/testdevice", "device_api_key", []byte(`{"brightness":70}`))
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	device, err = gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").First(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, device.DisplayingApp)
+	assert.Equal(t, "clock-main", *device.DisplayingApp)
+	assert.NotEqual(t, "999", *device.DisplayingApp)
+}
+
+func TestDisplayRestoreFallsBackToFirstEnabledRealApp(t *testing.T) {
+	device := data.Device{Apps: []*data.App{
+		{Iname: "pushed", Name: "pushed", Pushed: true, Enabled: true, Order: 0},
+		{Iname: "disabled", Name: "clock", Enabled: false, Order: 1},
+		{Iname: "weather", Name: "weather", Enabled: true, Order: 2},
+	}}
+	target := displayRestoreTarget(&device)
+	require.NotNil(t, target)
+	assert.Equal(t, "weather", target.Iname)
+}
+
 func TestCatalogueListingFiltersAndPagination(t *testing.T) {
 	s := newTestServerAPI(t)
 	s.systemAppsCache = []apps.AppMetadata{
@@ -344,4 +422,71 @@ func TestInstallationOrderingValidationAndSuccess(t *testing.T) {
 	require.Len(t, ordered, 3)
 	assert.Equal(t, []string{"300", "100", "200"}, []string{ordered[0].Iname, ordered[1].Iname, ordered[2].Iname})
 	assert.False(t, ordered[2].Enabled, fmt.Sprintf("disabled installation should remain disabled: %#v", ordered[2]))
+}
+
+func TestInstallationOrderingRejectsTemporaryPushedIDsButDoesNotRequireThem(t *testing.T) {
+	s := newTestServerAPI(t)
+	ctx := context.Background()
+	for i, app := range []data.App{
+		{DeviceID: "testdevice", Iname: "100", Name: "clock", Enabled: true, Order: 0},
+		{DeviceID: "testdevice", Iname: "200", Name: "weather", Enabled: true, Order: 1},
+		{DeviceID: "testdevice", Iname: "999", Name: "pushed", Pushed: true, Enabled: true, Order: 2},
+	} {
+		app.Order = i
+		require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &app))
+	}
+
+	req := newAPIRequest(http.MethodPatch, "/v0/devices/testdevice/installations/order", "device_api_key",
+		[]byte(`{"installationIDs":["200","100"]}`))
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	req = newAPIRequest(http.MethodPatch, "/v0/devices/testdevice/installations/order", "device_api_key",
+		[]byte(`{"installationIDs":["999","100"]}`))
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
+	assert.Contains(t, rr.Body.String(), "temporary pushed content")
+}
+
+func TestTemporaryPushedInstallationCannotBeDeleted(t *testing.T) {
+	s := newTestServerAPI(t)
+	ctx := context.Background()
+	path := "pushed:side-eye"
+	app := data.App{DeviceID: "testdevice", Iname: "999", Name: "pushed", Path: &path, Pushed: true, Enabled: true}
+	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &app))
+
+	req := newAPIRequest(http.MethodDelete, "/v0/devices/testdevice/installations/999", "device_api_key", nil)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
+	count, err := gorm.G[data.App](s.DB).Where("id = ?", app.ID).Count(ctx, "*")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+}
+
+func TestDeletingPinnedAndDisplayedInstallationClearsDeviceReferences(t *testing.T) {
+	s := newTestServerAPI(t)
+	ctx := context.Background()
+	app := data.App{DeviceID: "testdevice", Iname: "clock", Name: "clock", Enabled: true}
+	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &app))
+	_, err := gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").
+		Select("PinnedApp", "DisplayingApp", "DisplayRestoreApp").
+		Updates(ctx, data.Device{
+			PinnedApp:         new("clock"),
+			DisplayingApp:     new("clock"),
+			DisplayRestoreApp: new("clock"),
+		})
+	require.NoError(t, err)
+
+	req := newAPIRequest(http.MethodDelete, "/v0/devices/testdevice/installations/clock", "device_api_key", nil)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	device, err := gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").First(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, device.PinnedApp)
+	assert.Nil(t, device.DisplayingApp)
+	assert.Nil(t, device.DisplayRestoreApp)
 }

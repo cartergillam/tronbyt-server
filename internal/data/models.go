@@ -601,6 +601,7 @@ type Device struct {
 
 	LastAppIndex        int        `json:"last_app_index"`
 	DisplayingApp       *string    `json:"displaying_app"`
+	DisplayRestoreApp   *string    `json:"display_restore_app,omitempty"`
 	PinnedApp           *string    `json:"pinned_app"`
 	InterstitialEnabled bool       `json:"interstitial_enabled"`
 	InterstitialApp     *string    `json:"interstitial_app"`

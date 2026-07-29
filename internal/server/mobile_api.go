@@ -809,12 +809,21 @@ func (s *Server) reorderInstallations(ctx context.Context, deviceID string, inst
 	if err != nil {
 		return nil, err
 	}
-	if len(installationIDs) != len(appsList) {
+	realApps := make([]data.App, 0, len(appsList))
+	pushedIDs := make(map[string]bool)
+	for i := range appsList {
+		if appsList[i].Pushed {
+			pushedIDs[appsList[i].Iname] = true
+			continue
+		}
+		realApps = append(realApps, appsList[i])
+	}
+	if len(installationIDs) != len(realApps) {
 		return nil, errors.New("all installations must be included")
 	}
-	byID := make(map[string]*data.App, len(appsList))
-	for i := range appsList {
-		byID[appsList[i].Iname] = &appsList[i]
+	byID := make(map[string]*data.App, len(realApps))
+	for i := range realApps {
+		byID[realApps[i].Iname] = &realApps[i]
 	}
 	ordered := make([]*data.App, 0, len(installationIDs))
 	seen := make(map[string]bool, len(installationIDs))
@@ -823,6 +832,9 @@ func (s *Server) reorderInstallations(ctx context.Context, deviceID string, inst
 			return nil, fmt.Errorf("duplicate installation ID %q", id)
 		}
 		seen[id] = true
+		if pushedIDs[id] {
+			return nil, fmt.Errorf("installation %q is temporary pushed content", id)
+		}
 		app := byID[id]
 		if app == nil {
 			return nil, fmt.Errorf("installation %q does not belong to this device", id)

@@ -105,7 +105,7 @@ shape.
     "pushed": false,
     "renderIntervalMin": 5,
     "displayTimeSec": 15,
-    "lastRenderAt": 1785250000,
+    "lastRenderAt": null,
     "isInactive": false,
     "startTime": null,
     "endTime": null,
@@ -120,6 +120,10 @@ shape.
 
 Secret values never occur in `config`. `savedSecrets[key] == true` means the
 server has a non-empty saved value.
+
+`lastRenderAt` is nullable. A zero-value server timestamp is serialized as
+`null`; clients should continue treating zero, epoch, implausibly old, and
+clearly future legacy values as invalid.
 
 PATCH with:
 
@@ -158,7 +162,9 @@ forward compatibility while `appID` remains the installed app name.
 {"installationIDs":["weather-main","mlb-main","clock-main"]}
 ```
 
-Every installed app, including disabled apps, must occur exactly once. Success:
+Every persistent installed app, including disabled apps, must occur exactly
+once. Temporary pushed-frame records are absent from installation lists, must
+not be included, and are rejected if supplied. Success:
 
 ```json
 {
@@ -184,4 +190,3 @@ New endpoints use:
 `fields` is optional. Decode `code` as `String` so the client remains
 forward-compatible. Relevant statuses are `400`, `401`, `403`/`404`, `409`,
 `415`, `422`, `500`, and `502`.
-

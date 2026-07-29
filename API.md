@@ -97,10 +97,11 @@ PATCH /v0/devices/{id}/installations/order
 {"installationIDs":["weather-main","mlb-main","clock-main"]}
 ```
 
-The list must contain every installation on the device exactly once. Disabled
-apps remain disabled and participate in ordering. Updates are transactional.
-The response returns the authoritative `installationIDs` and installation
-objects.
+The list must contain every persistent installation on the device exactly once.
+Disabled apps remain disabled and participate in ordering. Temporary pushed
+content is excluded from the required list and is rejected if supplied. Updates
+are transactional. The response returns the authoritative `installationIDs`
+and installation objects.
 
 Existing published `/v0` routes and their historical plain-text errors remain
 compatible; typed errors apply to the mobile extension routes above.
@@ -242,7 +243,11 @@ Update low-level firmware settings. All fields are optional.
 GET /v0/devices/{id}/installations
 ```
 
-Returns all app installations on a device.
+Returns all persistent app installations on a device in cycle order. Internal
+temporary pushed-frame records (`pushed: true`) are deliberately excluded and
+cannot be fetched, reordered, configured, enabled/disabled, or deleted through
+installation routes. A missing render timestamp is returned as
+`"lastRenderAt": null`.
 
 **Response:**
 ```json
@@ -303,7 +308,19 @@ DELETE /v0/devices/{id}/installations/{iname}
 
 Removes an app installation and its associated WebP files.
 
+Temporary pushed content is rejected with `422 temporary_installation`.
+
 **Response:** `200 OK` — `"App deleted."`
+
+### Display power restoration
+
+Changing device brightness from a positive value to `0` through
+`PATCH /v0/devices/{id}` records a safe restore target and clears any temporary
+displaying frame. Changing brightness from `0` to a positive value stages the
+Clock installation for the next display update. If Clock is unavailable, the
+first enabled persistent installation in cycle order is used. Pushed content is
+never eligible. The selected real app is also sent immediately to connected
+WebSocket devices without creating a pushed installation.
 
 ---
 
