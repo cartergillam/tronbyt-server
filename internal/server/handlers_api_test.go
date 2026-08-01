@@ -954,6 +954,13 @@ func TestHandlePatchInstallation(t *testing.T) {
 	req := newAPIRequest("PATCH", fmt.Sprintf("/v0/devices/%s/installations/%s", deviceID, installID), apiKey, body)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusConflict, rr.Code, "the last restorable app must remain enabled")
+
+	fallback := data.App{DeviceID: deviceID, Iname: "fallbackapp", Name: "Fallback App", Enabled: true}
+	require.NoError(t, gorm.G[data.App](s.DB).Create(context.Background(), &fallback))
+	req = newAPIRequest("PATCH", fmt.Sprintf("/v0/devices/%s/installations/%s", deviceID, installID), apiKey, body)
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("handler returned wrong status code: got %v want %v: %s",
@@ -1115,6 +1122,13 @@ func TestHandleDeleteInstallationAPI(t *testing.T) {
 	req := newAPIRequest("DELETE", fmt.Sprintf("/v0/devices/%s/installations/%s", deviceID, installID), apiKey, nil)
 	rr := httptest.NewRecorder()
 
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusConflict, rr.Code, "the last restorable app must not be deleted")
+
+	fallback := data.App{DeviceID: deviceID, Iname: "fallbackapp", Name: "Fallback App", Enabled: true}
+	require.NoError(t, gorm.G[data.App](s.DB).Create(context.Background(), &fallback))
+	req = newAPIRequest("DELETE", fmt.Sprintf("/v0/devices/%s/installations/%s", deviceID, installID), apiKey, nil)
+	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {

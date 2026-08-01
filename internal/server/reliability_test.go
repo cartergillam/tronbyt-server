@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -120,4 +122,59 @@ func TestCleanupTemporaryPushLifecycle(t *testing.T) {
 	assert.Zero(t, second.StaleRowsRemoved)
 	assert.Zero(t, second.OrphanFilesRemoved)
 	assert.Zero(t, second.StaleTemporaryFiles)
+}
+
+func TestClassifyRenderResultBoundaries(t *testing.T) {
+	now := time.Date(2026, time.July, 31, 23, 30, 0, 0, time.UTC)
+
+	t.Run("visible clock boundary", func(t *testing.T) {
+		boundary := now.Add(time.Minute)
+		result, message, next := classifyRenderResult(now, []byte("frame"), []string{nextRenderMarker + boundary.Format(time.RFC3339)}, nil, 15)
+		assert.Equal(t, "visible", result)
+		assert.Empty(t, message)
+		require.NotNil(t, next)
+		assert.Equal(t, boundary, *next)
+	})
+
+	t.Run("no game retries quickly", func(t *testing.T) {
+		result, _, next := classifyRenderResult(now, nil, []string{"--- APPLET HIDDEN FROM ROTATION (NO GAME TODAY) ---"}, nil, 360)
+		assert.Equal(t, "hidden", result)
+		require.NotNil(t, next)
+		assert.Equal(t, now.Add(30*time.Minute), *next)
+	})
+
+	t.Run("upstream failure beats hidden marker", func(t *testing.T) {
+		result, message, next := classifyRenderResult(now, nil, []string{
+			renderFailureMarker + " MLB schedule temporarily unavailable",
+			"--- APPLET HIDDEN FROM ROTATION (NO GAME TODAY) ---",
+		}, nil, 360)
+		assert.Equal(t, "upstream_failure", result)
+		assert.Equal(t, "MLB schedule temporarily unavailable", message)
+		require.NotNil(t, next)
+		assert.Equal(t, now.Add(2*time.Minute), *next)
+	})
+
+	t.Run("renderer error wins", func(t *testing.T) {
+		result, message, next := classifyRenderResult(now, nil, nil, errors.New("private.example/path?token=secret"), 15)
+		assert.Equal(t, "failure", result)
+		assert.NotContains(t, message, "token=secret")
+		require.NotNil(t, next)
+		assert.Equal(t, now.Add(2*time.Minute), *next)
+	})
+}
+
+func TestDeviceEventTimelineIsBoundedAndRecordsHealthTransitions(t *testing.T) {
+	timeline := newDeviceEventTimeline(3)
+	for i := range 5 {
+		timeline.add("device", "render", fmt.Sprintf("event %d", i), "")
+	}
+	require.Len(t, timeline.recent("device", 10), 3)
+
+	timeline.setHealth("device", "stale")
+	timeline.setHealth("device", "stale")
+	timeline.setHealth("device", "connected")
+	events := timeline.recent("device", 10)
+	require.Len(t, events, 3)
+	assert.Equal(t, "device_resumed", events[0].Type)
+	assert.Equal(t, "device_stale", events[1].Type)
 }

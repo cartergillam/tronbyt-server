@@ -1,9 +1,15 @@
 package server
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
+	"time"
 
 	"tronbyt-server/internal/data"
 
@@ -11,8 +17,25 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+func newFrameRequestID() string {
+	var value [8]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(value[:])
+}
+
+func optionalString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 // handleNextApp is the handler for GET /{id}/next.
 func (s *Server) handleNextApp(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	requestID := newFrameRequestID()
 	s.metrics.devicePolls.Inc()
 	id := r.PathValue("id")
 
@@ -35,12 +58,15 @@ func (s *Server) handleNextApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if device == nil {
+		slog.Info("HTTP frame request", "request_id", requestID, "device_id", id, "authenticated", false, "status", http.StatusNotFound, "duration_ms", time.Since(started).Milliseconds())
 		http.Error(w, "Device not found", http.StatusNotFound)
 		return
 	}
 
 	if device.RequireAPIKey {
-		if key := extractDeviceKey(r); key == "" || key != device.APIKey {
+		if key := extractDeviceKey(r); key == "" || subtle.ConstantTimeCompare([]byte(key), []byte(device.APIKey)) != 1 {
+			s.diagnosticsEvents.add(id, "authentication_failure", "HTTP frame authentication rejected", "")
+			slog.Warn("HTTP frame request", "request_id", requestID, "device_id", id, "authenticated", false, "status", http.StatusUnauthorized, "duration_ms", time.Since(started).Milliseconds())
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -109,7 +135,12 @@ func (s *Server) handleNextApp(w http.ResponseWriter, r *http.Request) {
 		slog.Error("Failed to update device info transaction", "device", device.ID, "error", err)
 	}
 
-	imgData, app, err := s.GetNextAppImage(r.Context(), device, user)
+	lastIndexBefore := device.LastAppIndex
+	displayingBefore := optionalString(device.DisplayingApp)
+	restoreBefore := optionalString(device.DisplayRestoreApp)
+	trace := &frameSelectionTrace{}
+	ctx := withFrameSelectionTrace(r.Context(), trace)
+	imgData, app, err := s.GetNextAppImage(ctx, device, user)
 	if err != nil {
 		// Send default image if error (or not found)
 		slog.Error("Failed to get next app image", "device", device.ID, "error", err)
@@ -123,6 +154,11 @@ func (s *Server) handleNextApp(w http.ResponseWriter, r *http.Request) {
 		if _, err := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).Update(r.Context(), "displaying_app", app.Iname); err != nil {
 			slog.Error("Failed to update displaying_app for HTTP device", "device", device.ID, "error", err)
 		}
+		device.DisplayingApp = &app.Iname
+	}
+	now := time.Now()
+	if _, err := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).Update(r.Context(), "last_seen", &now); err == nil {
+		device.LastSeen = &now
 	}
 
 	// Send Headers
@@ -137,9 +173,46 @@ func (s *Server) handleNextApp(w http.ResponseWriter, r *http.Request) {
 
 	dwell := device.GetEffectiveDwellTime(app)
 	w.Header().Set("Tronbyt-Dwell-Secs", fmt.Sprintf("%d", dwell))
+	if app != nil {
+		w.Header().Set("Tronbyt-App", app.Name)
+		w.Header().Set("Tronbyt-Installation", app.Iname)
+	}
 
 	if _, err := w.Write(imgData); err != nil {
 		slog.Error("Failed to write image data to response", "error", err)
 		// Log error, but can't change HTTP status after writing headers.
 	}
+	hash := sha256.Sum256(imgData)
+	appID, iname, renderResult, renderMessage := "", "", "", ""
+	if app != nil {
+		appID, iname = app.Name, app.Iname
+		renderResult, renderMessage = app.LastRenderResult, app.LastRenderMessage
+	}
+	s.pollDiagnostics.Store(device.ID, pollDiagnostic{LastSuccess: now.UTC(), LatencyMS: time.Since(started).Milliseconds()})
+	s.diagnosticsEvents.add(device.ID, "device_poll", "HTTP frame delivered: "+trace.Reason, iname)
+	slog.Info("HTTP frame request",
+		"request_id", requestID,
+		"device_id", device.ID,
+		"authenticated", true,
+		"selection_reason", trace.Reason,
+		"classification", trace.Classification,
+		"installation_id", iname,
+		"app_name", appID,
+		"last_app_index_before", lastIndexBefore,
+		"last_app_index_after", device.LastAppIndex,
+		"displaying_app_before", displayingBefore,
+		"displaying_app_after", optionalString(device.DisplayingApp),
+		"display_restore_app", restoreBefore,
+		"render_result", renderResult,
+		"render_message", renderMessage,
+		"cache_decision", trace.CacheDecision,
+		"webp_path", filepath.Base(trace.WebPPath),
+		"sha256_prefix", hex.EncodeToString(hash[:6]),
+		"response_bytes", len(imgData),
+		"dwell_seconds", dwell,
+		"brightness", brightness,
+		"status", http.StatusOK,
+		"last_seen", now.UTC().Format(time.RFC3339),
+		"duration_ms", time.Since(started).Milliseconds(),
+	)
 }

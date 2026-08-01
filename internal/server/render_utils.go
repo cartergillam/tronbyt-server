@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,7 +27,7 @@ func (s *Server) RenderApp(ctx context.Context, device *data.Device, app *data.A
 	var config map[string]any
 	switch {
 	case configOverrides != nil:
-		config = configOverrides
+		config = maps.Clone(configOverrides)
 	case app != nil && app.Config != nil:
 		config = maps.Clone(app.Config)
 	default:
@@ -40,9 +41,7 @@ func (s *Server) RenderApp(ctx context.Context, device *data.Device, app *data.A
 
 	if device != nil {
 		deviceTimezone = device.GetTimezone()
-		// The legacy "$tz" config variable should eventually be removed.
-		// The system apps already use `time.tz()`, but users' custom apps might not.
-		config["$tz"] = deviceTimezone
+		applyDeviceRenderContext(config, device)
 		locale = device.Locale
 		supports2x = device.Type.Supports2x()
 	}
@@ -92,9 +91,38 @@ func (s *Server) RenderApp(ctx context.Context, device *data.Device, app *data.A
 	)
 }
 
+func applyDeviceRenderContext(config map[string]any, device *data.Device) {
+	// The legacy "$tz" variable remains for custom apps; location-aware apps
+	// receive both an explicit device object and a backwards-compatible default.
+	config["$tz"] = device.GetTimezone()
+	if !device.HasLocation() {
+		return
+	}
+	encoded, err := json.Marshal(device.Location)
+	if err != nil {
+		return
+	}
+	locationJSON := string(encoded)
+	config["$location"] = locationJSON
+	if current, present := config["location"]; !present || current == nil || current == "" || current == "__device__" {
+		config["location"] = locationJSON
+	}
+}
+
 func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data.Device, user *data.User) bool {
 	// 1. Pushed App (Pre-rendered)
 	if app.Pushed {
+		if app.PushKind != persistentPushKind {
+			return false
+		}
+		webpDir, err := s.ensureDeviceImageDir(device.ID)
+		if err != nil {
+			return false
+		}
+		if _, err := os.Stat(s.getAppWebpPath(webpDir, app)); err != nil {
+			s.removeMissingPersistentPush(ctx, device, app)
+			return false
+		}
 		if app.AutoPin {
 			s.handleAutoPin(ctx, app, device, user, true)
 		}
@@ -139,10 +167,15 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 		return true // Exists
 	}
 
-	// 3. Starlark App - Check Interval
+	// 3. Starlark App - Check interval or an app-provided eligibility boundary.
 	now := time.Now()
-	// uinterval is minutes
-	if time.Since(app.LastRender) > time.Duration(app.UInterval)*time.Minute {
+	shouldRender := app.LastRender.IsZero() || app.LastRender.After(now.Add(5*time.Minute))
+	if !shouldRender && app.NextRenderAt != nil {
+		shouldRender = !now.Before(*app.NextRenderAt)
+	} else if !shouldRender {
+		shouldRender = now.Sub(app.LastRender) > time.Duration(app.UInterval)*time.Minute
+	}
+	if shouldRender {
 		slog.Info("Rendering app", "app", appBasename)
 
 		startTime := time.Now()
@@ -155,6 +188,7 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 
 		empty := len(imgBytes) == 0
 		success := err == nil && !empty
+		result, message, nextRenderAt := classifyRenderResult(now, imgBytes, messages, err, app.UInterval)
 
 		s.metrics.renderDuration.Observe(renderDur.Seconds())
 		switch {
@@ -171,18 +205,40 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 		// Update App State in DB - This is our atomic check-and-update.
 		// If the app was deleted while we were rendering, RowsAffected will be 0.
 		appUpdates := data.App{
-			LastRender:      now,
-			LastRenderDur:   renderDur,
-			EmptyLastRender: !success,
-			RenderMessages:  data.StringSlice(messages),
+			LastRender:        now,
+			LastRenderDur:     renderDur,
+			EmptyLastRender:   !success,
+			RenderMessages:    data.StringSlice(messages),
+			LastRenderResult:  result,
+			LastRenderMessage: message,
+			NextRenderAt:      nextRenderAt,
+		}
+		switch result {
+		case "visible":
+			appUpdates.ConsecutiveFailures = 0
+			appUpdates.ConsecutiveHidden = 0
+		case "hidden":
+			appUpdates.ConsecutiveFailures = 0
+			appUpdates.ConsecutiveHidden = app.ConsecutiveHidden + 1
+		default:
+			appUpdates.ConsecutiveFailures = app.ConsecutiveFailures + 1
+			appUpdates.ConsecutiveHidden = 0
 		}
 
 		q := gorm.G[data.App](s.DB).Where("id = ?", app.ID)
 		if success {
 			appUpdates.LastSuccessfulRender = &now
-			q = q.Select("LastRender", "LastRenderDur", "EmptyLastRender", "RenderMessages", "LastSuccessfulRender")
+			q = q.Select(
+				"LastRender", "LastRenderDur", "EmptyLastRender", "RenderMessages",
+				"LastRenderResult", "LastRenderMessage", "NextRenderAt",
+				"ConsecutiveFailures", "ConsecutiveHidden", "LastSuccessfulRender",
+			)
 		} else {
-			q = q.Select("LastRender", "LastRenderDur", "EmptyLastRender", "RenderMessages")
+			q = q.Select(
+				"LastRender", "LastRenderDur", "EmptyLastRender", "RenderMessages",
+				"LastRenderResult", "LastRenderMessage", "NextRenderAt",
+				"ConsecutiveFailures", "ConsecutiveHidden",
+			)
 		}
 
 		rowsAffected, err := q.Updates(ctx, appUpdates)
@@ -211,15 +267,116 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 		app.LastRenderDur = renderDur
 		app.EmptyLastRender = !success
 		app.RenderMessages = messages
+		app.LastRenderResult = result
+		app.LastRenderMessage = message
+		app.NextRenderAt = nextRenderAt
+		app.ConsecutiveFailures = appUpdates.ConsecutiveFailures
+		app.ConsecutiveHidden = appUpdates.ConsecutiveHidden
 
 		// Handle Autopin
 		if app.AutoPin {
 			s.handleAutoPin(ctx, app, device, user, success)
 		}
+		eventType := "render_" + result
+		s.diagnosticsEvents.add(device.ID, eventType, message, app.Iname)
 		return success
 	}
 
 	return true // Not time to render yet, assume existing is fine
+}
+
+const (
+	nextRenderMarker    = "TRONBYT-NEXT-RENDER:"
+	hiddenUntilMarker   = "TRONBYT-HIDDEN-UNTIL:"
+	renderFailureMarker = "TRONBYT-RENDER-FAILURE:"
+)
+
+func classifyRenderResult(now time.Time, image []byte, messages []string, renderErr error, intervalMinutes int) (string, string, *time.Time) {
+	hidden := false
+	upstreamFailure := false
+	failureMessage := ""
+	var next *time.Time
+	for _, raw := range messages {
+		line := strings.TrimSpace(raw)
+		switch {
+		case strings.HasPrefix(line, hiddenUntilMarker):
+			hidden = true
+			next = parseBoundedRenderTime(now, strings.TrimSpace(strings.TrimPrefix(line, hiddenUntilMarker)))
+		case strings.Contains(line, "APPLET HIDDEN FROM ROTATION"):
+			hidden = true
+		case strings.HasPrefix(line, renderFailureMarker):
+			upstreamFailure = true
+			failureMessage = sanitizedRenderMessage(strings.TrimSpace(strings.TrimPrefix(line, renderFailureMarker)))
+		case strings.HasPrefix(line, nextRenderMarker):
+			next = parseBoundedRenderTime(now, strings.TrimSpace(strings.TrimPrefix(line, nextRenderMarker)))
+		}
+	}
+	result := "visible"
+	message := ""
+	if renderErr != nil {
+		result = "failure"
+		message = sanitizedRenderMessage(renderErr.Error())
+		next = nil
+	} else if upstreamFailure {
+		result = "upstream_failure"
+		message = failureMessage
+		next = nil
+	} else if hidden {
+		result = "hidden"
+		message = "Intentionally hidden"
+	}
+	if len(image) == 0 && result == "visible" {
+		result = "empty"
+		message = "Render produced no visible output"
+	}
+	if next == nil {
+		var delay time.Duration
+		switch result {
+		case "hidden":
+			delay = 30 * time.Minute
+		case "failure", "upstream_failure":
+			delay = 2 * time.Minute
+		case "empty":
+			delay = 5 * time.Minute
+		default:
+			delay = time.Duration(intervalMinutes) * time.Minute
+		}
+		value := now.Add(delay)
+		next = &value
+	}
+	return result, message, next
+}
+
+func parseBoundedRenderTime(now time.Time, value string) *time.Time {
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil || parsed.Before(now.Add(5*time.Second)) || parsed.After(now.Add(24*time.Hour)) {
+		return nil
+	}
+	return &parsed
+}
+
+func sanitizedRenderMessage(value string) string {
+	value = strings.ReplaceAll(value, "\n", " ")
+	value = strings.TrimSpace(value)
+	fields := strings.Fields(value)
+	for i, field := range fields {
+		if query := strings.IndexByte(field, '?'); query >= 0 && strings.Contains(field[query+1:], "=") {
+			fields[i] = field[:query] + "?[redacted]"
+			continue
+		}
+		if separator := strings.IndexByte(field, '='); separator > 0 {
+			key := strings.Trim(strings.ToLower(field[:separator]), "\"'[]{}(),:")
+			switch key {
+			case "token", "key", "api_key", "apikey", "authorization", "password", "secret":
+				fields[i] = field[:separator+1] + "[redacted]"
+			}
+		}
+	}
+	value = strings.Join(fields, " ")
+	if len(value) > 240 {
+		value = value[:240]
+	}
+	return value
 }
 
 func (s *Server) handleAutoPin(ctx context.Context, app *data.App, device *data.Device, user *data.User, success bool) {

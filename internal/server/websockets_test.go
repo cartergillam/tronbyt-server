@@ -39,6 +39,7 @@ func TestWebsockets_Client(t *testing.T) {
 		Iname:       appIname,
 		Name:        "WS Test App",
 		Pushed:      true,
+		PushKind:    persistentPushKind,
 		Enabled:     true,
 		Order:       0,
 		DisplayTime: 5,

@@ -18,6 +18,24 @@ import (
 	"gorm.io/gorm"
 )
 
+type frameSelectionTrace struct {
+	Reason         string
+	Classification string
+	WebPPath       string
+	CacheDecision  string
+}
+
+type frameSelectionTraceKey struct{}
+
+func withFrameSelectionTrace(ctx context.Context, trace *frameSelectionTrace) context.Context {
+	return context.WithValue(ctx, frameSelectionTraceKey{}, trace)
+}
+
+func selectionTrace(ctx context.Context) *frameSelectionTrace {
+	trace, _ := ctx.Value(frameSelectionTraceKey{}).(*frameSelectionTrace)
+	return trace
+}
+
 func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user *data.User) ([]byte, *data.App, error) {
 	// 1. Check Pushed Ephemeral Images (__*)
 	// Serve the oldest and delete only that one. Anonymous pushes accumulate
@@ -44,6 +62,13 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 					if err := os.Remove(entryPath); err != nil {
 						slog.Warn("Failed to remove ephemeral image", "path", entryPath, "error", err)
 					}
+					if trace := selectionTrace(ctx); trace != nil {
+						trace.Reason = "temporary_push"
+						trace.Classification = "temporary_push"
+						trace.WebPPath = entryPath
+						trace.CacheDecision = "one_shot_file"
+					}
+					s.diagnosticsEvents.add(device.ID, "temporary_push_displayed", "Temporary frame displayed", "")
 					return imgData, nil, nil
 				}
 				// If reading failed, clean it up and try the next one
@@ -57,6 +82,13 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 
 	// Helper to return default image
 	getDefaultImage := func() ([]byte, *data.App, error) {
+		if trace := selectionTrace(ctx); trace != nil {
+			if trace.Reason == "" {
+				trace.Reason = "default"
+			}
+			trace.Classification = "default"
+			trace.WebPPath = "embedded:static/images/default.webp"
+		}
 		data, err := web.Assets.ReadFile("static/images/default.webp")
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to read default image: %w", err)
@@ -66,12 +98,18 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 
 	// 2. Apps Check
 	if len(device.Apps) == 0 {
+		if trace := selectionTrace(ctx); trace != nil {
+			trace.Reason = "no_apps"
+		}
 		slog.Debug("No apps on device, returning default image", "device", device.ID)
 		return getDefaultImage()
 	}
 
 	// 3. Brightness Check
 	if device.GetEffectiveBrightness() == 0 {
+		if trace := selectionTrace(ctx); trace != nil {
+			trace.Reason = "brightness_zero"
+		}
 		slog.Debug("Brightness is 0, returning default image")
 		return getDefaultImage()
 	}
@@ -79,6 +117,9 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 	// 4. Rotation Logic
 	app, nextIndex, err := s.determineNextApp(ctx, device, user)
 	if err != nil || app == nil {
+		if trace := selectionTrace(ctx); trace != nil {
+			trace.Reason = "no_eligible_app"
+		}
 		slog.Debug("No valid app found (e.g. all disabled or scheduled out), returning default image", "device", device.ID, "error", err)
 		return getDefaultImage()
 	}
@@ -124,6 +165,14 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 	}
 
 	webpPath = s.getAppWebpPath(deviceWebpDir, app)
+	if trace := selectionTrace(ctx); trace != nil {
+		trace.WebPPath = webpPath
+		if app.NextRenderAt != nil && time.Now().Before(*app.NextRenderAt) {
+			trace.CacheDecision = "cached_until_next_eligible_render"
+		} else {
+			trace.CacheDecision = app.LastRenderResult
+		}
+	}
 
 	data, err := os.ReadFile(webpPath)
 	// If reading the specific app image fails, fall back to default
@@ -218,6 +267,9 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 			app := device.Apps[i]
 			if app.Iname == restoreID && !app.Pushed && app.Enabled &&
 				s.possiblyRender(ctx, app, device, user) && !app.EmptyLastRender {
+				if trace := selectionTrace(ctx); trace != nil {
+					trace.Reason, trace.Classification = "display_restore", "restore"
+				}
 				return app, expandedIndexForInstallation(device, app.Iname), nil
 			}
 		}
@@ -232,6 +284,9 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 				app := device.Apps[i]
 				// Found Night Mode app, check if it's renderable before returning
 				if s.possiblyRender(ctx, app, device, user) && !app.EmptyLastRender {
+					if trace := selectionTrace(ctx); trace != nil {
+						trace.Reason, trace.Classification = "night_mode", "night"
+					}
 					return app, device.LastAppIndex, nil
 				}
 				// Stop if context was canceled
@@ -255,6 +310,9 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 				app := device.Apps[i]
 				// Found pinned app, check renderability
 				if s.possiblyRender(ctx, app, device, user) && !app.EmptyLastRender {
+					if trace := selectionTrace(ctx); trace != nil {
+						trace.Reason, trace.Classification = "pinned", "pinned"
+					}
 					return app, device.LastAppIndex, nil
 				}
 				// Stop if context was canceled

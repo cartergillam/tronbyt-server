@@ -84,6 +84,12 @@ func TestHandleNextApp(t *testing.T) {
 	if rr.Header().Get("Content-Type") != "image/webp" {
 		t.Errorf("Expected content type image/webp, got %s", rr.Header().Get("Content-Type"))
 	}
+	if rr.Header().Get("Tronbyt-App") != "Test App" {
+		t.Errorf("Expected selected app response header, got %q", rr.Header().Get("Tronbyt-App"))
+	}
+	if rr.Header().Get("Tronbyt-Installation") != "1" {
+		t.Errorf("Expected selected installation response header, got %q", rr.Header().Get("Tronbyt-Installation"))
+	}
 }
 
 func TestHandleNextApp_FirmwareUpdate(t *testing.T) {

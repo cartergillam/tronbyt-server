@@ -52,6 +52,9 @@ type Server struct {
 
 	systemAppsCache      []apps.AppMetadata
 	systemAppsCacheMutex sync.RWMutex
+	devicePollLocks      sync.Map
+	diagnosticsEvents    *deviceEventTimeline
+	pollDiagnostics      sync.Map
 
 	// SchemaCache, when set, allows forcing a one-shot refetch of an app's
 	// cached HTTP responses so dynamic schema data (e.g. dropdown options
@@ -60,6 +63,13 @@ type Server struct {
 
 	UpdateAvailable  bool
 	LatestReleaseURL string
+}
+
+func (s *Server) lockDevicePoll(deviceID string) func() {
+	value, _ := s.devicePollLocks.LoadOrStore(deviceID, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
 }
 
 // SchemaCacheBypasser forces cache reads for keys with the given prefix to miss
@@ -103,8 +113,9 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 				return true
 			},
 		},
-		PromRegistry: prometheus.DefaultRegisterer,
-		PromGatherer: prometheus.DefaultGatherer,
+		PromRegistry:      prometheus.DefaultRegisterer,
+		PromGatherer:      prometheus.DefaultGatherer,
+		diagnosticsEvents: newDeviceEventTimeline(100),
 	}
 
 	// Load Settings from DB

@@ -33,6 +33,7 @@ type DeviceUpdate struct {
 	NightModeStartTime  *string              `json:"nightModeStartTime"`
 	NightModeEndTime    *string              `json:"nightModeEndTime"`
 	DimModeActive       *bool                `json:"dimModeActive"`
+	DimModeEnabled      *bool                `json:"dimModeEnabled"`
 	DimModeStartTime    *string              `json:"dimModeStartTime"`
 	DimModeBrightness   *int                 `json:"dimModeBrightness"`
 	PinnedApp           *string              `json:"pinnedApp"`
@@ -234,6 +235,12 @@ type AppPayload struct {
 	DisplayTimeSec      int    `json:"displayTimeSec"`
 	LastRenderAt        *int64 `json:"lastRenderAt"`
 	IsInactive          bool   `json:"isInactive"`
+	LastRenderResult    string `json:"lastRenderResult,omitempty"`
+	LastRenderMessage   string `json:"lastRenderMessage,omitempty"`
+	NextRenderAt        *int64 `json:"nextEligibleRenderAt,omitempty"`
+	ConsecutiveFailures int    `json:"consecutiveFailureCount"`
+	ConsecutiveHidden   int    `json:"consecutiveHiddenCount"`
+	LastVisibleRenderAt *int64 `json:"lastVisibleSuccessfulRenderAt,omitempty"`
 	LocationSource      string `json:"locationSource,omitempty"`
 
 	// Schedule fields
@@ -257,17 +264,33 @@ func (s *Server) toAppPayload(device *data.Device, app *data.App) AppPayload {
 		value := app.LastRender.Unix()
 		lastRenderAt = &value
 	}
+	var nextRenderAt *int64
+	if app.NextRenderAt != nil {
+		value := app.NextRenderAt.Unix()
+		nextRenderAt = &value
+	}
+	var lastVisibleRenderAt *int64
+	if app.LastSuccessfulRender != nil {
+		value := app.LastSuccessfulRender.Unix()
+		lastVisibleRenderAt = &value
+	}
 	return AppPayload{
-		ID:                app.Iname,
-		AppID:             app.Name,
-		Enabled:           app.Enabled,
-		Pinned:            pinned,
-		Pushed:            app.Pushed,
-		RenderIntervalMin: app.UInterval,
-		DisplayTimeSec:    app.DisplayTime,
-		LastRenderAt:      lastRenderAt,
-		IsInactive:        app.EmptyLastRender,
-		LocationSource:    appLocationSource(app, device),
+		ID:                  app.Iname,
+		AppID:               app.Name,
+		Enabled:             app.Enabled,
+		Pinned:              pinned,
+		Pushed:              app.Pushed,
+		RenderIntervalMin:   app.UInterval,
+		DisplayTimeSec:      app.DisplayTime,
+		LastRenderAt:        lastRenderAt,
+		IsInactive:          app.EmptyLastRender,
+		LastRenderResult:    app.LastRenderResult,
+		LastRenderMessage:   app.LastRenderMessage,
+		NextRenderAt:        nextRenderAt,
+		ConsecutiveFailures: app.ConsecutiveFailures,
+		ConsecutiveHidden:   app.ConsecutiveHidden,
+		LastVisibleRenderAt: lastVisibleRenderAt,
+		LocationSource:      appLocationSource(app, device),
 
 		StartTime: app.StartTime,
 		EndTime:   app.EndTime,
@@ -458,6 +481,11 @@ func (s *Server) handlePushApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if dataReq.Persistent {
+		s.diagnosticsEvents.add(device.ID, "persistent_push_created", "Persistent pushed frame created", installationID)
+	} else {
+		s.diagnosticsEvents.add(device.ID, "temporary_push_created", "Temporary Show Now frame created", installationID)
+	}
 
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte("App pushed.")); err != nil {
@@ -568,6 +596,11 @@ func (s *Server) handlePushImage(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Failed to save image: %v", err), http.StatusInternalServerError)
 			return
 		}
+	}
+	if dataReq.Persistent {
+		s.diagnosticsEvents.add(device.ID, "persistent_push_created", "Persistent pushed frame created", installID)
+	} else {
+		s.diagnosticsEvents.add(device.ID, "temporary_push_created", "Temporary pushed frame created", installID)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -829,6 +862,7 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if locationChanged {
+		invalidated := 0
 		apps, err := gorm.G[data.App](s.DB).Where("device_id = ?", device.ID).Find(r.Context())
 		if err != nil {
 			slog.Warn("Failed to load apps for location invalidation", "device", device.ID, "error", err)
@@ -842,8 +876,13 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 				}
 				app.LastRender = time.Time{}
 				app.NextRenderAt = nil
+				invalidated++
 			}
 		}
+		s.diagnosticsEvents.add(device.ID, "location_changed", fmt.Sprintf("Device location changed; %d app(s) invalidated", invalidated), "")
+	}
+	if update.Brightness != nil && previousBrightness != *update.Brightness {
+		s.diagnosticsEvents.add(device.ID, "brightness_changed", fmt.Sprintf("Brightness changed from %d to %d", previousBrightness, *update.Brightness), "")
 	}
 	if update.Brightness != nil {
 		switch {
@@ -907,6 +946,17 @@ func (s *Server) handlePatchInstallation(w http.ResponseWriter, r *http.Request)
 	}
 
 	if update.Enabled != nil {
+		if !*update.Enabled && app.Enabled {
+			enabledCount, err := gorm.G[data.App](s.DB).Where("device_id = ? AND pushed = ? AND enabled = ? AND id <> ?", device.ID, false, true, app.ID).Count(r.Context(), "*")
+			if err != nil {
+				http.Error(w, "Failed to validate enabled apps", http.StatusInternalServerError)
+				return
+			}
+			if enabledCount == 0 {
+				http.Error(w, "At least one restorable app must remain enabled", http.StatusConflict)
+				return
+			}
+		}
 		app.Enabled = *update.Enabled
 		if !app.Enabled {
 			// Delete associated webp files when app is disabled
@@ -942,6 +992,10 @@ func (s *Server) handlePatchInstallation(w http.ResponseWriter, r *http.Request)
 	}
 	if update.Pinned != nil {
 		if *update.Pinned {
+			if !app.Enabled || app.EmptyLastRender || app.LastRenderResult == "hidden" || app.LastRenderResult == "failure" || app.LastRenderResult == "upstream_failure" {
+				http.Error(w, "A disabled, hidden, or failing app cannot be pinned", http.StatusConflict)
+				return
+			}
 			device.PinnedApp = &app.Iname
 		} else if device.PinnedApp != nil && *device.PinnedApp == app.Iname {
 			device.PinnedApp = nil
@@ -1069,11 +1123,16 @@ func (s *Server) handleDeleteInstallationAPI(w http.ResponseWriter, r *http.Requ
 		writeAPIError(w, http.StatusUnprocessableEntity, "temporary_installation", "Temporary pushed content cannot be deleted as an installation", nil)
 		return
 	}
-
-	// Delete the app
-	if _, err := gorm.G[data.App](s.DB).Where("id = ?", app.ID).Delete(r.Context()); err != nil {
-		http.Error(w, "Failed to delete app", http.StatusInternalServerError)
-		return
+	if !app.Pushed && app.Enabled {
+		enabledCount, countErr := gorm.G[data.App](s.DB).Where("device_id = ? AND pushed = ? AND enabled = ? AND id <> ?", device.ID, false, true, app.ID).Count(r.Context(), "*")
+		if countErr != nil {
+			http.Error(w, "Failed to validate enabled apps", http.StatusInternalServerError)
+			return
+		}
+		if enabledCount == 0 {
+			http.Error(w, "At least one restorable app must remain enabled", http.StatusConflict)
+			return
+		}
 	}
 	var deviceFields []string
 	if device.PinnedApp != nil && *device.PinnedApp == app.Iname {
@@ -1088,16 +1147,28 @@ func (s *Server) handleDeleteInstallationAPI(w http.ResponseWriter, r *http.Requ
 		device.DisplayRestoreApp = nil
 		deviceFields = append(deviceFields, "DisplayRestoreApp")
 	}
-	if len(deviceFields) > 0 {
-		if _, err := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).
-			Select("PinnedApp", "DisplayingApp", "DisplayRestoreApp").Updates(r.Context(), data.Device{
+	if device.NightModeApp == app.Iname {
+		device.NightModeApp = ""
+		deviceFields = append(deviceFields, "NightModeApp")
+	}
+	if err := s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(&data.App{}, app.ID).Error; err != nil {
+			return err
+		}
+		if len(deviceFields) == 0 {
+			return nil
+		}
+		_, err := gorm.G[data.Device](tx).Where("id = ?", device.ID).
+			Select("PinnedApp", "DisplayingApp", "DisplayRestoreApp", "NightModeApp").Updates(r.Context(), data.Device{
 			PinnedApp:         device.PinnedApp,
 			DisplayingApp:     device.DisplayingApp,
 			DisplayRestoreApp: device.DisplayRestoreApp,
-		}); err != nil {
-			http.Error(w, "Failed to clear deleted app state", http.StatusInternalServerError)
-			return
-		}
+			NightModeApp:      device.NightModeApp,
+		})
+		return err
+	}); err != nil {
+		http.Error(w, "Failed to delete app", http.StatusInternalServerError)
+		return
 	}
 
 	// Clean up files using the actual iname
@@ -1232,6 +1303,10 @@ func (s *Server) SetupAPIRoutes() {
 	s.Router.Handle("GET /v0/devices/{id}", s.APIAuthMiddleware(s.RequireDevice(s.handleGetDevice)))
 	s.Router.Handle("GET /v0/devices/{id}/preview", s.APIAuthMiddleware(s.RequireDevice(s.handleMobilePreview)))
 	s.Router.Handle("GET /v0/devices/{id}/installations/{iname}/preview", s.APIAuthMiddleware(s.RequireDevice(s.handleInstallationPreview)))
+	s.Router.Handle("GET /v0/devices/{id}/diagnostics", s.APIAuthMiddleware(s.RequireDevice(s.handleDeviceDiagnostics)))
+	s.Router.Handle("POST /v0/devices/{id}/diagnostics/clear-temporary", s.APIAuthMiddleware(s.RequireDevice(s.handleClearTemporaryDisplay)))
+	s.Router.Handle("POST /v0/devices/{id}/diagnostics/restore-rotation", s.APIAuthMiddleware(s.RequireDevice(s.handleRestoreNormalRotation)))
+	s.Router.Handle("POST /v0/devices/{id}/installations/{iname}/retry-render", s.APIAuthMiddleware(s.RequireDevice(s.handleRetryInstallationRender)))
 	s.Router.Handle("POST /v0/devices/{id}/push", s.APIAuthMiddleware(s.RequireDevice(s.handlePushImage)))
 	s.Router.Handle("POST /v0/devices/{id}/push_app", s.APIAuthMiddleware(s.RequireDevice(s.handlePushApp)))
 	s.Router.Handle("POST /v0/devices/{id}/update_firmware_settings", s.APIAuthMiddleware(s.RequireDevice(s.handleUpdateFirmwareSettingsAPI)))
