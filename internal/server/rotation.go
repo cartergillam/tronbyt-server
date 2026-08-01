@@ -314,7 +314,7 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 					shouldDisplay = false
 				}
 			}
-		} else if candidate.Enabled && IsAppScheduleActive(candidate, device) {
+		} else if candidate.Enabled && (!candidate.Pushed || candidate.PushKind == "persistent") && IsAppScheduleActive(candidate, device) {
 			shouldDisplay = true
 		}
 
@@ -326,6 +326,15 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 
 		if shouldDisplay {
 			if s.possiblyRender(ctx, candidate, device, user) && !candidate.EmptyLastRender {
+				if trace := selectionTrace(ctx); trace != nil {
+					if isInterstitialPos {
+						trace.Reason, trace.Classification = "interstitial", "interstitial"
+					} else if candidate.Pushed {
+						trace.Reason, trace.Classification = "persistent_push", "persistent_push"
+					} else {
+						trace.Reason, trace.Classification = "rotation", "normal"
+					}
+				}
 				return candidate, nextIndex, nil
 			}
 			// Stop trying more apps if context was canceled (e.g., request timed out)

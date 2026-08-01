@@ -3,10 +3,44 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 
 	"tronbyt-server/internal/data"
 )
+
+func TestConcurrentHTTPPollsConsumeDistinctOneShotFrames(t *testing.T) {
+	s := newTestServerAPI(t)
+	if err := s.savePushedImage("testdevice", "", "first", []byte("frame-one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.savePushedImage("testdevice", "", "second", []byte("frame-two")); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan string, 2)
+	for range 2 {
+		go func() {
+			<-start
+			req := httptest.NewRequest(http.MethodGet, "/testdevice/next", nil)
+			req.SetPathValue("id", "testdevice")
+			rr := httptest.NewRecorder()
+			s.handleNextApp(rr, req)
+			if rr.Code != http.StatusOK {
+				results <- "status-error"
+				return
+			}
+			results <- rr.Body.String()
+		}()
+	}
+	close(start)
+	frames := []string{<-results, <-results}
+	sort.Strings(frames)
+	if frames[0] != "frame-one" || frames[1] != "frame-two" {
+		t.Fatalf("concurrent polls returned %q; expected both one-shot frames exactly once", frames)
+	}
+}
 
 func TestHandleNextApp(t *testing.T) {
 	s := newTestServerAPI(t)
@@ -21,6 +55,7 @@ func TestHandleNextApp(t *testing.T) {
 		UInterval: 10,
 		Enabled:   true,
 		Pushed:    true,
+		PushKind:  persistentPushKind,
 		Path:      &path,
 	}
 	if err := s.DB.Create(&app).Error; err != nil {
@@ -29,6 +64,9 @@ func TestHandleNextApp(t *testing.T) {
 
 	if err := s.savePushedImage("testdevice", "testapp", "", []byte("dummy image")); err != nil {
 		t.Fatalf("Failed to save pushed image: %v", err)
+	}
+	if err := s.savePushedImage("testdevice", "1", "", []byte("dummy image")); err != nil {
+		t.Fatalf("Failed to save selected pushed image: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/testdevice/next", nil)

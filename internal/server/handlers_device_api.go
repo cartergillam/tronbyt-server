@@ -46,6 +46,12 @@ func (s *Server) handleNextApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	unlockPoll := s.lockDevicePoll(device.ID)
+	defer unlockPoll()
+	if fresh, err := gorm.G[data.Device](s.DB).Preload("Apps", nil).Where("id = ?", device.ID).First(r.Context()); err == nil {
+		device = &fresh
+	}
+
 	if len(device.Apps) == 0 {
 		reloaded, err := gorm.G[data.Device](s.DB).Preload("Apps", nil).Where("id = ?", device.ID).First(r.Context())
 		if err == nil {

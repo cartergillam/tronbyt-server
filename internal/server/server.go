@@ -226,6 +226,9 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 
 	s.registerMetrics()
 	s.RefreshSystemAppsCache()
+	if err := s.cleanupTemporaryPushLifecycle(context.Background()); err != nil {
+		slog.Warn("Failed to clean temporary push lifecycle", "error", err)
+	}
 
 	// Clean up and recreate tmp directory
 	tmpDir := s.GetTmpDir()

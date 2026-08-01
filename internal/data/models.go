@@ -545,6 +545,7 @@ type App struct {
 	Notes                string        `json:"notes"`
 	Enabled              bool          `json:"enabled"`
 	Pushed               bool          `json:"pushed"`
+	PushKind             string        `json:"push_kind,omitempty"`
 	Order                int           `gorm:"index:idx_device_order,priority:2" json:"order"`
 	LastRender           time.Time     `json:"last_render"`
 	LastSuccessfulRender *time.Time    `json:"last_successful_render"`

@@ -14,6 +14,19 @@ import (
 	"gorm.io/gorm"
 )
 
+func persistentTestFrame(t *testing.T, s *Server, deviceID, pushID string) *string {
+	t.Helper()
+	pushedDir := filepath.Join(s.DataDir, "webp", deviceID, "pushed")
+	if err := os.MkdirAll(pushedDir, 0755); err != nil {
+		t.Fatalf("failed to create persistent push directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pushedDir, pushID+".webp"), []byte("test frame"), 0644); err != nil {
+		t.Fatalf("failed to create persistent push frame: %v", err)
+	}
+	path := "pushed:" + pushID
+	return &path
+}
+
 func TestDetermineNextApp_NightMode(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -43,7 +56,9 @@ func TestDetermineNextApp_NightMode(t *testing.T) {
 		Iname:    "app-regular",
 		Name:     "Regular App",
 		Enabled:  true,
-		Pushed:   true, // Bypass rendering check
+		Pushed:   true,
+		PushKind: persistentPushKind,
+		Path:     persistentTestFrame(t, s, device.ID, "app-regular"),
 		Order:    1,
 	}
 	if err := gorm.G[data.App](s.DB).Create(ctx, &appRegular); err != nil {
@@ -56,7 +71,9 @@ func TestDetermineNextApp_NightMode(t *testing.T) {
 		Iname:    "app-night",
 		Name:     "Night App",
 		Enabled:  false, // Usually disabled for day rotation
-		Pushed:   true,  // Bypass rendering check
+		Pushed:   true,
+		PushKind: persistentPushKind,
+		Path:     persistentTestFrame(t, s, device.ID, "app-night"),
 		Order:    2,
 	}
 	if err := gorm.G[data.App](s.DB).Create(ctx, &appNight); err != nil {
@@ -125,6 +142,8 @@ func TestDetermineNextApp_NightMode_NoAppSelected(t *testing.T) {
 		Name:     "Regular App",
 		Enabled:  true,
 		Pushed:   true,
+		PushKind: persistentPushKind,
+		Path:     persistentTestFrame(t, s, device.ID, "app-regular"),
 		Order:    1,
 	}
 	if err := gorm.G[data.App](s.DB).Create(ctx, &appRegular); err != nil {
@@ -188,6 +207,8 @@ func TestDetermineNextApp_NightModePrecedence(t *testing.T) {
 		Name:     "Pinned App",
 		Enabled:  true,
 		Pushed:   true,
+		PushKind: persistentPushKind,
+		Path:     persistentTestFrame(t, s, device.ID, pinnedAppID),
 		Order:    1,
 	}); err != nil {
 		t.Fatalf("failed to create pinned app: %v", err)
@@ -200,6 +221,8 @@ func TestDetermineNextApp_NightModePrecedence(t *testing.T) {
 		Name:     "Night App",
 		Enabled:  true,
 		Pushed:   true,
+		PushKind: persistentPushKind,
+		Path:     persistentTestFrame(t, s, device.ID, nightAppID),
 		Order:    2,
 	}); err != nil {
 		t.Fatalf("failed to create night app: %v", err)
@@ -261,6 +284,8 @@ func TestDetermineNextApp_Pinning(t *testing.T) {
 		Name:     "App 1",
 		Enabled:  true,
 		Pushed:   true,
+		PushKind: persistentPushKind,
+		Path:     persistentTestFrame(t, s, device.ID, "app-1"),
 		Order:    1,
 	}
 	if err := gorm.G[data.App](s.DB).Create(ctx, &app1); err != nil {
@@ -274,6 +299,8 @@ func TestDetermineNextApp_Pinning(t *testing.T) {
 		Name:     "App 2",
 		Enabled:  true,
 		Pushed:   true,
+		PushKind: persistentPushKind,
+		Path:     persistentTestFrame(t, s, device.ID, pinnedAppID),
 		Order:    2,
 	}
 	if err := gorm.G[data.App](s.DB).Create(ctx, &app2); err != nil {
@@ -364,7 +391,9 @@ func TestDetermineNextApp_AutoPin(t *testing.T) {
 		Name:     "AutoPin App",
 		Enabled:  true,
 		AutoPin:  true,
-		Pushed:   true, // Initially treated as successful render
+		Pushed:   true,
+		PushKind: persistentPushKind,
+		Path:     persistentTestFrame(t, s, device.ID, "autopin-app"),
 		Order:    1,
 	}
 	if err := gorm.G[data.App](s.DB).Create(ctx, &app); err != nil {

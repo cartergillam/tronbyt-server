@@ -246,6 +246,7 @@ func TestHandlePushImage(t *testing.T) {
 	pushData := PushData{
 		InstallationID: installID,
 		Image:          dummyWebp,
+		Persistent:     true,
 	}
 	body, _ := json.Marshal(pushData)
 
@@ -311,6 +312,7 @@ def main(config):
 		AppID:          appID,
 		Config:         map[string]any{"foo": "bar"},
 		InstallationID: "testinstall",
+		Persistent:     true,
 	}
 	body, _ := json.Marshal(pushAppData)
 
@@ -333,6 +335,32 @@ def main(config):
 	if _, err := os.Stat(expectedPath); os.IsNotExist(err) {
 		t.Errorf("Expected pushed image to exist at %s, but it didn't", expectedPath)
 	}
+}
+
+func TestHandlePushAppDefaultsToOneShot(t *testing.T) {
+	s := newTestServerAPI(t)
+	deviceID := "testdevice"
+	appID := setupColorApp(t, s)
+
+	body, _ := json.Marshal(PushAppData{
+		AppID:          appID,
+		InstallationID: "one-shot",
+		Config:         map[string]any{"color": "#ff0000"},
+	})
+	req := newAPIRequest("POST", fmt.Sprintf("/v0/devices/%s/push_app", deviceID), "device_api_key", body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	count, err := gorm.G[data.App](s.DB).Where("device_id = ? AND pushed = ?", deviceID, true).Count(context.Background(), "*")
+	require.NoError(t, err)
+	assert.Zero(t, count, "one-shot pushes must not create rotation installations")
+
+	entries, err := os.ReadDir(filepath.Join(s.DataDir, "webp", deviceID, "pushed"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Contains(t, entries[0].Name(), "show-now-one-shot")
+	assert.True(t, strings.HasPrefix(entries[0].Name(), "__"), "one-shot pushes must use consumable files")
 }
 
 func TestHandlePushAppUpdatesExistingInstallation(t *testing.T) {
@@ -361,6 +389,7 @@ def main(config):
 			AppID:          appID,
 			Config:         map[string]any{"color": color},
 			InstallationID: installID,
+			Persistent:     true,
 		})
 		req := newAPIRequest("POST", fmt.Sprintf("/v0/devices/%s/push_app", deviceID), apiKey, body)
 		rr := httptest.NewRecorder()
@@ -419,6 +448,7 @@ def main(config):
 		DisplayTime: 0,
 		Enabled:     true,
 		Pushed:      true,
+		PushKind:    "persistent",
 		Path:        &installPath,
 	}
 	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &pushedApp))
@@ -428,6 +458,7 @@ def main(config):
 		InstallationID: installID,
 		AppID:          appID,
 		Config:         map[string]any{"color": "#ff0000"},
+		Persistent:     true,
 	})
 	req := newAPIRequest("POST", fmt.Sprintf("/v0/devices/%s/push_app", deviceID), apiKey, body)
 	rr := httptest.NewRecorder()
@@ -454,6 +485,7 @@ func seedPushedInstallation(t *testing.T, s *Server, deviceID, installID string)
 		DisplayTime: 0,
 		Enabled:     true,
 		Pushed:      true,
+		PushKind:    "persistent",
 		Path:        &installPath,
 	}
 	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &app))
@@ -495,6 +527,7 @@ func TestHandlePushAppConfigReplacesCache(t *testing.T) {
 		InstallationID: installID,
 		AppID:          appID,
 		Config:         map[string]any{"color": "#ff0000"},
+		Persistent:     true,
 	})
 	req := newAPIRequest("POST", fmt.Sprintf("/v0/devices/%s/push_app", deviceID), apiKey, body)
 	rr := httptest.NewRecorder()
@@ -516,7 +549,7 @@ func TestHandlePushAppNoCacheConfigServesCache(t *testing.T) {
 	installID := "cached-install"
 	sentinel := seedPushedInstallation(t, s, deviceID, installID)
 
-	body, _ := json.Marshal(PushAppData{InstallationID: installID})
+	body, _ := json.Marshal(PushAppData{InstallationID: installID, Persistent: true})
 	req := newAPIRequest("POST", fmt.Sprintf("/v0/devices/%s/push_app", deviceID), apiKey, body)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -576,6 +609,7 @@ func TestHandlePushAppBackground(t *testing.T) {
 		InstallationID: installID,
 		Config:         map[string]any{"color": "#ff0000"},
 		Background:     true,
+		Persistent:     true,
 	})
 	req := newAPIRequest("POST", fmt.Sprintf("/v0/devices/%s/push_app", deviceID), apiKey, body)
 	rr := httptest.NewRecorder()

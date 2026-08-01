@@ -295,6 +295,7 @@ type PushAppData struct {
 	InstallationIDAlt string         `json:"installationId"`
 	CoalesceID        string         `json:"coalesceID"`
 	Background        bool           `json:"background"`
+	Persistent        bool           `json:"persistent"`
 }
 
 func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
@@ -336,9 +337,14 @@ func (s *Server) handlePushApp(w http.ResponseWriter, r *http.Request) {
 	var existingApp *data.App
 	var appPath string
 	if installationID != "" {
-		existingApp = device.GetPushedApp(installationID)
+		if dataReq.Persistent {
+			existingApp = device.GetPushedApp(installationID)
+		}
 		if existingApp == nil {
 			existingApp = device.GetApp(installationID)
+			if existingApp != nil && existingApp.Pushed && !dataReq.Persistent {
+				existingApp = nil
+			}
 		}
 		// Only derive appPath from non-pushed installations; "pushed:<id>" is not a real app path.
 		if existingApp != nil && existingApp.Path != nil && *existingApp.Path != "" &&
@@ -349,7 +355,7 @@ func (s *Server) handlePushApp(w http.ResponseWriter, r *http.Request) {
 
 	// For pushed apps with a cached image and no new config/app being sent, skip
 	// re-rendering and re-push the existing image directly.
-	if existingApp != nil && existingApp.Pushed &&
+	if dataReq.Persistent && existingApp != nil && existingApp.Pushed &&
 		existingApp.Path != nil && strings.HasPrefix(*existingApp.Path, "pushed:") &&
 		len(dataReq.Config) == 0 && dataReq.AppID == "" {
 		cachedID := strings.TrimPrefix(*existingApp.Path, "pushed:")
@@ -368,7 +374,7 @@ func (s *Server) handlePushApp(w http.ResponseWriter, r *http.Request) {
 			if !dataReq.Background {
 				s.Broadcaster.Notify(device.ID, imgBytes)
 			}
-			if err := s.ensurePushedApp(r.Context(), device.ID, cachedID); err != nil {
+			if err := s.ensurePersistentPushedApp(r.Context(), device.ID, cachedID); err != nil {
 				slog.Error("Error adding pushed app", "error", err)
 			}
 			w.WriteHeader(http.StatusOK)
@@ -426,9 +432,9 @@ func (s *Server) handlePushApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if installationID != "" {
+	if dataReq.Persistent && installationID != "" {
 		// Ensure app record exists
-		if err := s.ensurePushedApp(r.Context(), device.ID, installationID); err != nil {
+		if err := s.ensurePersistentPushedApp(r.Context(), device.ID, installationID); err != nil {
 			slog.Error("Failed to ensure pushed app", "error", err)
 		}
 	}
@@ -439,8 +445,15 @@ func (s *Server) handlePushApp(w http.ResponseWriter, r *http.Request) {
 		sent = s.Broadcaster.Notify(device.ID, imgBytes)
 	}
 
-	if !sent || installationID != "" {
-		if err := s.savePushedImage(device.ID, installationID, dataReq.CoalesceID, imgBytes); err != nil {
+	if !sent || dataReq.Persistent {
+		persistentID := ""
+		coalesceID := dataReq.CoalesceID
+		if dataReq.Persistent {
+			persistentID = installationID
+		} else if coalesceID == "" && installationID != "" {
+			coalesceID = "show-now-" + installationID
+		}
+		if err := s.savePushedImage(device.ID, persistentID, coalesceID, imgBytes); err != nil {
 			http.Error(w, "Failed to save image", http.StatusInternalServerError)
 			return
 		}
@@ -508,6 +521,7 @@ type PushData struct {
 	CoalesceID        string `json:"coalesceID"`
 	Image             string `json:"image"`
 	Background        bool   `json:"background"`
+	Persistent        bool   `json:"persistent"`
 }
 
 func (s *Server) handlePushImage(w http.ResponseWriter, r *http.Request) {
@@ -530,8 +544,8 @@ func (s *Server) handlePushImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if installID != "" {
-		if err := s.ensurePushedApp(r.Context(), device.ID, installID); err != nil {
+	if dataReq.Persistent && installID != "" {
+		if err := s.ensurePersistentPushedApp(r.Context(), device.ID, installID); err != nil {
 			slog.Error("Error adding pushed app", "error", err)
 		}
 	}
@@ -542,8 +556,15 @@ func (s *Server) handlePushImage(w http.ResponseWriter, r *http.Request) {
 		sent = s.Broadcaster.Notify(device.ID, imgBytes)
 	}
 
-	if !sent || installID != "" {
-		if err := s.savePushedImage(device.ID, installID, dataReq.CoalesceID, imgBytes); err != nil {
+	if !sent || dataReq.Persistent {
+		persistentID := ""
+		coalesceID := dataReq.CoalesceID
+		if dataReq.Persistent {
+			persistentID = installID
+		} else if coalesceID == "" && installID != "" {
+			coalesceID = "show-now-" + installID
+		}
+		if err := s.savePushedImage(device.ID, persistentID, coalesceID, imgBytes); err != nil {
 			http.Error(w, fmt.Sprintf("Failed to save image: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -647,7 +668,7 @@ func (s *Server) savePushedImage(deviceID, installID, coalesceID string, data []
 	return nil
 }
 
-func (s *Server) ensurePushedApp(ctx context.Context, deviceID, installID string) error {
+func (s *Server) ensurePersistentPushedApp(ctx context.Context, deviceID, installID string) error {
 	// Check if app exists by matching on installID (for pushed apps, we need to look up by installID)
 	// Since installID might be non-numeric (e.g., "pushed:hasssolarlocal1"), we check via path/file
 	count, err := gorm.G[data.App](s.DB).Where("device_id = ? AND pushed = ? AND path = ?", deviceID, true, "pushed:"+installID).Count(ctx, "*")
@@ -677,6 +698,7 @@ func (s *Server) ensurePushedApp(ctx context.Context, deviceID, installID string
 		DisplayTime: 0,
 		Enabled:     true,
 		Pushed:      true,
+		PushKind:    "persistent",
 		Path:        &installPath,
 	}
 
@@ -770,6 +792,9 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	if update.DimModeStartTime != nil {
 		device.DimTime = update.DimModeStartTime
+	}
+	if update.DimModeEnabled != nil {
+		device.DimModeEnabled = *update.DimModeEnabled
 	}
 	if update.DimModeBrightness != nil {
 		val := data.Brightness(*update.DimModeBrightness)
