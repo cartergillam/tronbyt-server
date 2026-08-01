@@ -24,36 +24,39 @@ import (
 
 // DeviceUpdate represents the updatable fields for a device via API.
 type DeviceUpdate struct {
-	Brightness          *int    `json:"brightness"`
-	IntervalSec         *int    `json:"intervalSec"`
-	NightModeEnabled    *bool   `json:"nightModeEnabled"`
-	NightModeActive     *bool   `json:"nightModeActive"`
-	NightModeApp        *string `json:"nightModeApp"`
-	NightModeBrightness *int    `json:"nightModeBrightness"`
-	NightModeStartTime  *string `json:"nightModeStartTime"`
-	NightModeEndTime    *string `json:"nightModeEndTime"`
-	DimModeActive       *bool   `json:"dimModeActive"`
-	DimModeStartTime    *string `json:"dimModeStartTime"`
-	DimModeBrightness   *int    `json:"dimModeBrightness"`
-	PinnedApp           *string `json:"pinnedApp"`
-	AutoDim             *bool   `json:"autoDim"` // Legacy
+	Brightness          *int                 `json:"brightness"`
+	IntervalSec         *int                 `json:"intervalSec"`
+	NightModeEnabled    *bool                `json:"nightModeEnabled"`
+	NightModeActive     *bool                `json:"nightModeActive"`
+	NightModeApp        *string              `json:"nightModeApp"`
+	NightModeBrightness *int                 `json:"nightModeBrightness"`
+	NightModeStartTime  *string              `json:"nightModeStartTime"`
+	NightModeEndTime    *string              `json:"nightModeEndTime"`
+	DimModeActive       *bool                `json:"dimModeActive"`
+	DimModeStartTime    *string              `json:"dimModeStartTime"`
+	DimModeBrightness   *int                 `json:"dimModeBrightness"`
+	PinnedApp           *string              `json:"pinnedApp"`
+	AutoDim             *bool                `json:"autoDim"` // Legacy
+	Location            *data.DeviceLocation `json:"location"`
 }
 
 // DevicePayload represents the full device data returned via API.
 type DevicePayload struct {
-	ID           string          `json:"id"`
-	Type         data.DeviceType `json:"type"`
-	DisplayName  string          `json:"displayName"`
-	Notes        string          `json:"notes"`
-	IntervalSec  int             `json:"intervalSec"`
-	Brightness   int             `json:"brightness"`
-	NightMode    NightMode       `json:"nightMode"`
-	DimMode      DimMode         `json:"dimMode"`
-	PinnedApp    *string         `json:"pinnedApp"`
-	Interstitial Interstitial    `json:"interstitial"`
-	LastSeen     *string         `json:"lastSeen"`
-	Info         DeviceInfo      `json:"info"`
-	AutoDim      bool            `json:"autoDim"`
+	ID           string              `json:"id"`
+	Type         data.DeviceType     `json:"type"`
+	DisplayName  string              `json:"displayName"`
+	Notes        string              `json:"notes"`
+	IntervalSec  int                 `json:"intervalSec"`
+	Brightness   int                 `json:"brightness"`
+	NightMode    NightMode           `json:"nightMode"`
+	DimMode      DimMode             `json:"dimMode"`
+	PinnedApp    *string             `json:"pinnedApp"`
+	Interstitial Interstitial        `json:"interstitial"`
+	LastSeen     *string             `json:"lastSeen"`
+	Info         DeviceInfo          `json:"info"`
+	AutoDim      bool                `json:"autoDim"`
+	Location     data.DeviceLocation `json:"location"`
+	Timezone     string              `json:"timezone"`
 }
 
 // NightMode represents night mode settings in the API payload.
@@ -178,20 +181,60 @@ func (s *Server) toDevicePayload(d *data.Device) DevicePayload {
 		LastSeen: lastSeen,
 		Info:     info,
 		AutoDim:  d.NightModeEnabled,
+		Location: d.Location,
+		Timezone: d.GetTimezone(),
 	}
+}
+
+func validateDeviceLocation(location data.DeviceLocation) error {
+	if location == (data.DeviceLocation{}) {
+		return nil
+	}
+	if location.Lat < -90 || location.Lat > 90 {
+		return fmt.Errorf("latitude must be between -90 and 90")
+	}
+	if location.Lng < -180 || location.Lng > 180 {
+		return fmt.Errorf("longitude must be between -180 and 180")
+	}
+	if strings.TrimSpace(location.Timezone) == "" {
+		return fmt.Errorf("timezone is required")
+	}
+	if _, err := time.LoadLocation(location.Timezone); err != nil {
+		return fmt.Errorf("timezone must be a valid IANA identifier")
+	}
+	if strings.TrimSpace(location.Description) == "" && strings.TrimSpace(location.Locality) == "" {
+		return fmt.Errorf("description or locality is required")
+	}
+	if len(location.Description) > 200 || len(location.Locality) > 100 || len(location.Region) > 100 || len(location.Country) > 100 {
+		return fmt.Errorf("location description fields are too long")
+	}
+	if len(location.Provider) > 40 || len(location.PlaceID) > 200 {
+		return fmt.Errorf("location provider identifier is too long")
+	}
+	return nil
+}
+
+func appUsesDeviceLocation(app *data.App) bool {
+	if value, present := app.Config["location"]; present {
+		return value == nil || value == "" || value == "__device__"
+	}
+	name := strings.ToLower(app.Name)
+	return strings.Contains(name, "weather") || strings.Contains(name, "clock") || strings.Contains(name, "time") ||
+		strings.Contains(name, "sunrise") || strings.Contains(name, "sunset") || strings.Contains(name, "mlb") || strings.Contains(name, "local")
 }
 
 // AppPayload represents the API response for an app installation.
 type AppPayload struct {
-	ID                string `json:"id"`
-	AppID             string `json:"appID"`
-	Enabled           bool   `json:"enabled"`
-	Pinned            bool   `json:"pinned"`
-	Pushed            bool   `json:"pushed"`
-	RenderIntervalMin int    `json:"renderIntervalMin"`
-	DisplayTimeSec    int    `json:"displayTimeSec"`
-	LastRenderAt      *int64 `json:"lastRenderAt"`
-	IsInactive        bool   `json:"isInactive"`
+	ID                  string `json:"id"`
+	AppID               string `json:"appID"`
+	Enabled             bool   `json:"enabled"`
+	Pinned              bool   `json:"pinned"`
+	Pushed              bool   `json:"pushed"`
+	RenderIntervalMin   int    `json:"renderIntervalMin"`
+	DisplayTimeSec      int    `json:"displayTimeSec"`
+	LastRenderAt        *int64 `json:"lastRenderAt"`
+	IsInactive          bool   `json:"isInactive"`
+	LocationSource      string `json:"locationSource,omitempty"`
 
 	// Schedule fields
 	StartTime *string  `json:"startTime"`
@@ -224,6 +267,7 @@ func (s *Server) toAppPayload(device *data.Device, app *data.App) AppPayload {
 		DisplayTimeSec:    app.DisplayTime,
 		LastRenderAt:      lastRenderAt,
 		IsInactive:        app.EmptyLastRender,
+		LocationSource:    appLocationSource(app, device),
 
 		StartTime: app.StartTime,
 		EndTime:   app.EndTime,
@@ -657,6 +701,21 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 	}
 
 	previousBrightness := int(device.Brightness)
+	locationChanged := false
+	if update.Location != nil {
+		if err := validateDeviceLocation(*update.Location); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		locationChanged = device.Location != *update.Location
+		device.Location = *update.Location
+		if update.Location.Timezone == "" {
+			device.Timezone = nil
+		} else {
+			tz := update.Location.Timezone
+			device.Timezone = &tz
+		}
+	}
 	if update.Brightness != nil {
 		device.Brightness = data.Brightness(*update.Brightness)
 	}
@@ -743,6 +802,23 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 	if err := s.DB.Omit("Apps").Save(device).Error; err != nil {
 		http.Error(w, "Failed to update device", http.StatusInternalServerError)
 		return
+	}
+	if locationChanged {
+		apps, err := gorm.G[data.App](s.DB).Where("device_id = ?", device.ID).Find(r.Context())
+		if err != nil {
+			slog.Warn("Failed to load apps for location invalidation", "device", device.ID, "error", err)
+			apps = nil
+		}
+		for _, app := range apps {
+			if !app.Pushed && appUsesDeviceLocation(&app) {
+				if _, err := gorm.G[data.App](s.DB).Where("id = ?", app.ID).Select("LastRender", "NextRenderAt").Updates(r.Context(), data.App{LastRender: time.Time{}, NextRenderAt: nil}); err != nil {
+					slog.Warn("Failed to invalidate location-aware render", "device", device.ID, "installation_id", app.Iname, "error", err)
+					continue
+				}
+				app.LastRender = time.Time{}
+				app.NextRenderAt = nil
+			}
+		}
 	}
 	if update.Brightness != nil {
 		switch {

@@ -743,6 +743,90 @@ func TestHandlePatchDevice(t *testing.T) {
 	s.ServeHTTP(rr, req)
 }
 
+func TestValidateDeviceLocation(t *testing.T) {
+	valid := data.DeviceLocation{Description: "Toronto, ON, Canada", Locality: "Toronto", Lat: 43.6532, Lng: -79.3832, Timezone: "America/Toronto"}
+	require.NoError(t, validateDeviceLocation(valid))
+	require.NoError(t, validateDeviceLocation(data.DeviceLocation{}), "an empty value clears location")
+
+	tests := []struct {
+		name     string
+		location data.DeviceLocation
+	}{
+		{"latitude", data.DeviceLocation{Locality: "x", Lat: 91, Timezone: "UTC"}},
+		{"longitude", data.DeviceLocation{Locality: "x", Lng: -181, Timezone: "UTC"}},
+		{"timezone required", data.DeviceLocation{Locality: "x"}},
+		{"timezone invalid", data.DeviceLocation{Locality: "x", Timezone: "Eastern Time"}},
+		{"place required", data.DeviceLocation{Lat: 1, Lng: 1, Timezone: "UTC"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.Error(t, validateDeviceLocation(test.location))
+		})
+	}
+}
+
+func TestHandlePatchDeviceLocationPersistsAndInvalidatesRenders(t *testing.T) {
+	s := newTestServerAPI(t)
+	ctx := context.Background()
+	lastRender := time.Now().Add(-time.Minute)
+	app := data.App{DeviceID: "testdevice", Iname: "weather", Name: "weather", Enabled: true, LastRender: lastRender}
+	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &app))
+
+	location := data.DeviceLocation{
+		Description: "Caledonia, ON, Canada",
+		Locality:    "Caledonia",
+		Region:      "Ontario",
+		Country:     "Canada",
+		Lat:         43.0738,
+		Lng:         -79.9519,
+		Timezone:    "America/Toronto",
+		Provider:    "apple",
+	}
+	body, _ := json.Marshal(DeviceUpdate{Location: &location})
+	req := newAPIRequest("PATCH", "/v0/devices/testdevice", "device_api_key", body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	device, err := gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").First(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, location, device.Location)
+	require.NotNil(t, device.Timezone)
+	assert.Equal(t, "America/Toronto", *device.Timezone)
+
+	updatedApp, err := gorm.G[data.App](s.DB).Where("id = ?", app.ID).First(ctx)
+	require.NoError(t, err)
+	assert.True(t, updatedApp.LastRender.IsZero(), "changing device location must promptly rerender dependent apps")
+
+	empty := data.DeviceLocation{}
+	body, _ = json.Marshal(DeviceUpdate{Location: &empty})
+	req = newAPIRequest("PATCH", "/v0/devices/testdevice", "device_api_key", body)
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	device, err = gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").First(ctx)
+	require.NoError(t, err)
+	assert.False(t, device.HasLocation())
+	assert.Nil(t, device.Timezone)
+}
+
+func TestDeviceKeyCannotPatchAnotherDeviceLocation(t *testing.T) {
+	s := newTestServerAPI(t)
+	ctx := context.Background()
+	other := data.Device{ID: "otherdevice", Username: "testuser", Name: "Other", Type: data.DeviceTidbytGen1, APIKey: "other_device_key"}
+	require.NoError(t, gorm.G[data.Device](s.DB).Create(ctx, &other))
+	location := data.DeviceLocation{Locality: "Toronto", Lat: 43.65, Lng: -79.38, Timezone: "America/Toronto"}
+	body, _ := json.Marshal(DeviceUpdate{Location: &location})
+	req := newAPIRequest("PATCH", "/v0/devices/otherdevice", "device_api_key", body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+
+	unchanged, err := gorm.G[data.Device](s.DB).Where("id = ?", "otherdevice").First(ctx)
+	require.NoError(t, err)
+	assert.False(t, unchanged.HasLocation())
+}
+
 func TestHandlePatchDeviceNightModeActive(t *testing.T) {
 	s := newTestServerAPI(t)
 	apiKey := "test_api_key"

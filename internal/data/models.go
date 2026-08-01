@@ -371,7 +371,10 @@ type DeviceLocation struct {
 	Lat         float64 `json:"lat"`
 	Lng         float64 `json:"lng"`
 	Locality    string  `json:"locality"`
+	Region      string  `json:"region,omitempty"`
+	Country     string  `json:"country,omitempty"`
 	PlaceID     string  `json:"place_id"`
+	Provider    string  `json:"provider,omitempty"`
 	Timezone    string  `json:"timezone"`
 }
 
@@ -705,7 +708,8 @@ func (d *Device) HasLocation() bool {
 	}
 	l := d.Location
 	return l.Timezone != "" || l.Description != "" || l.Locality != "" ||
-		l.PlaceID != "" || l.Lat != 0 || l.Lng != 0
+		l.Region != "" || l.Country != "" || l.PlaceID != "" || l.Provider != "" ||
+		l.Lat != 0 || l.Lng != 0
 }
 
 func (d *Device) GetTimezone() string {
