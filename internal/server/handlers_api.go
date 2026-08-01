@@ -1121,14 +1121,16 @@ func (s *Server) handleUpdateFirmwareSettingsAPI(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) SetupAPIRoutes() {
+	s.Router.Handle("GET /v0/capabilities", s.CatalogueAuthMiddleware(http.HandlerFunc(s.handleCapabilities)))
 	// API v0 Group - authenticated with Middleware
-	s.Router.Handle("GET /v0/catalogue", s.APIAuthMiddleware(http.HandlerFunc(s.handleCatalogueList)))
-	s.Router.Handle("GET /v0/catalogue/{appID}", s.APIAuthMiddleware(http.HandlerFunc(s.handleCatalogueDetail)))
-	s.Router.Handle("GET /v0/catalogue/{appID}/schema", s.APIAuthMiddleware(http.HandlerFunc(s.handleCatalogueSchema)))
-	s.Router.Handle("GET /v0/catalogue/{appID}/icon", s.APIAuthMiddleware(http.HandlerFunc(s.handleCatalogueIcon)))
+	s.Router.Handle("GET /v0/catalogue", s.CatalogueAuthMiddleware(http.HandlerFunc(s.handleCatalogueList)))
+	s.Router.Handle("GET /v0/catalogue/{appID}", s.CatalogueAuthMiddleware(http.HandlerFunc(s.handleCatalogueDetail)))
+	s.Router.Handle("GET /v0/catalogue/{appID}/schema", s.CatalogueAuthMiddleware(http.HandlerFunc(s.handleCatalogueSchema)))
+	s.Router.Handle("GET /v0/catalogue/{appID}/icon", s.CatalogueAuthMiddleware(http.HandlerFunc(s.handleCatalogueIcon)))
 	s.Router.Handle("GET /v0/devices", s.APIAuthMiddleware(http.HandlerFunc(s.handleListDevices)))
 	s.Router.Handle("GET /v0/devices/{id}", s.APIAuthMiddleware(s.RequireDevice(s.handleGetDevice)))
 	s.Router.Handle("GET /v0/devices/{id}/preview", s.APIAuthMiddleware(s.RequireDevice(s.handleMobilePreview)))
+	s.Router.Handle("GET /v0/devices/{id}/installations/{iname}/preview", s.APIAuthMiddleware(s.RequireDevice(s.handleInstallationPreview)))
 	s.Router.Handle("POST /v0/devices/{id}/push", s.APIAuthMiddleware(s.RequireDevice(s.handlePushImage)))
 	s.Router.Handle("POST /v0/devices/{id}/push_app", s.APIAuthMiddleware(s.RequireDevice(s.handlePushApp)))
 	s.Router.Handle("POST /v0/devices/{id}/update_firmware_settings", s.APIAuthMiddleware(s.RequireDevice(s.handleUpdateFirmwareSettingsAPI)))

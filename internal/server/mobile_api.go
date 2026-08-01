@@ -7,6 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"log/slog"
 	"maps"
@@ -15,6 +19,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,10 +31,13 @@ import (
 	"tronbyt-server/internal/renderer"
 
 	securejoin "github.com/cyphar/filepath-securejoin"
+	_ "golang.org/x/image/webp"
 	"gorm.io/gorm"
 )
 
 const mobileAPIMaxBody = 1 << 20
+const catalogueIconMaxBytes = 4 << 20
+const catalogueIconMaxPixels = 4_194_304
 
 type apiError struct {
 	Error apiErrorDetail `json:"error"`
@@ -85,6 +94,8 @@ type normalizedSchemaField struct {
 	Order       int                      `json:"order"`
 	Visibility  any                      `json:"visibility,omitempty"`
 	SourceType  string                   `json:"sourceType,omitempty"`
+	Pattern     string                   `json:"pattern,omitempty"`
+	Placeholder string                   `json:"placeholder,omitempty"`
 }
 
 type normalizedSchemaOption struct {
@@ -109,6 +120,8 @@ type pixletSchemaFieldJSON struct {
 	Required    bool                     `json:"required"`
 	Minimum     *float64                 `json:"minimum"`
 	Maximum     *float64                 `json:"maximum"`
+	Pattern     string                   `json:"pattern"`
+	Placeholder string                   `json:"placeholder"`
 }
 
 type pixletSchemaOptionJSON struct {
@@ -192,6 +205,7 @@ func normalizeSchemaBytes(raw []byte) (normalizedSchema, error) {
 			Type: typ, Required: field.Required, Default: normalizeDefault(field, typ),
 			Minimum: field.Minimum, Maximum: field.Maximum, Options: options,
 			Secret: field.Secret, Order: i, Visibility: field.Visibility, SourceType: field.Type,
+			Pattern: field.Pattern, Placeholder: field.Placeholder,
 		})
 	}
 	return result, nil
@@ -211,6 +225,9 @@ type catalogueApp struct {
 	Published           string            `json:"published,omitempty"`
 	Updated             string            `json:"updated,omitempty"`
 	RecommendedInterval int               `json:"recommendedRenderIntervalMin,omitempty"`
+	Featured            bool              `json:"featured"`
+	LocationAware       bool              `json:"locationAware"`
+	Installed           bool              `json:"installed"`
 	Schema              *normalizedSchema `json:"schema,omitempty"`
 	meta                apps.AppMetadata
 }
@@ -239,7 +256,10 @@ func (s *Server) catalogueForUser(user *data.User) []catalogueApp {
 			ID: meta.ID, Name: meta.Name, Description: description, Author: meta.Author,
 			Category: meta.Category, Tags: nonNilStrings(meta.Tags), Repository: repository,
 			IconURL: icon, Configurable: configurable, Published: meta.Published, Updated: meta.Updated,
-			RecommendedInterval: meta.RecommendedInterval, meta: meta,
+			RecommendedInterval: meta.RecommendedInterval,
+			Featured:            strings.EqualFold(meta.Category, "featured") || containsFold(meta.Tags, "featured"),
+			LocationAware:       containsFold(meta.Tags, "location") || containsFold(meta.Tags, "weather") || strings.Contains(strings.ToLower(description), "location"),
+			meta:                meta,
 		})
 	}
 	for _, meta := range s.ListSystemApps() {
@@ -265,6 +285,27 @@ func (s *Server) catalogueForUser(user *data.User) []catalogueApp {
 		return left < right
 	})
 	return result
+}
+
+func containsFold(values []string, target string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func catalogueRevisionForItems(items []catalogueApp) string {
+	hash := sha256.New()
+	for _, item := range items {
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00%s\n", item.ID, item.Repository, item.Updated, item.meta.Preview)
+	}
+	return hex.EncodeToString(hash.Sum(nil)[:8])
+}
+
+func (s *Server) catalogueRevision(user *data.User) string {
+	return catalogueRevisionForItems(s.catalogueForUser(user))
 }
 
 func (s *Server) findCatalogueApp(user *data.User, id string) (*catalogueApp, error) {
@@ -328,13 +369,79 @@ func (s *Server) handleMobilePreview(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(image)
 }
 
+func (s *Server) handleInstallationPreview(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+	app := device.GetApp(r.PathValue("iname"))
+	if app == nil || app.Pushed {
+		writeAPIError(w, http.StatusNotFound, "app_not_found", "Installation not found", nil)
+		return
+	}
+	path := s.getAppWebpPath(filepath.Join(s.DataDir, "webp", device.ID), app)
+	stat, err := os.Stat(path)
+	if err != nil || stat.IsDir() || stat.Size() <= 0 || stat.Size() > 32<<20 {
+		writeAPIError(w, http.StatusNotFound, "preview_not_found", "No rendered preview is available for this installation", nil)
+		return
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		writeAPIError(w, http.StatusNotFound, "preview_not_found", "No rendered preview is available for this installation", nil)
+		return
+	}
+	sum := sha256.Sum256(content)
+	etag := `"` + hex.EncodeToString(sum[:]) + `"`
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "no-cache")
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "image/webp")
+	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+	w.Header().Set("Last-Modified", stat.ModTime().UTC().Format(http.TimeFormat))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(content)
+}
+
 func (s *Server) handleCatalogueList(w http.ResponseWriter, r *http.Request) {
 	items := s.catalogueForUser(GetUser(r))
+	revision := catalogueRevisionForItems(items)
+	for i := range items {
+		if items[i].IconURL != nil {
+			value := *items[i].IconURL + "?revision=" + url.QueryEscape(revision)
+			items[i].IconURL = &value
+		}
+	}
 	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("search")))
 	category := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("category")))
 	repository := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("repository")))
+	locationAware := r.URL.Query().Get("locationAware") == "true"
+	sports := r.URL.Query().Get("sports") == "true"
+	installedOnly := r.URL.Query().Get("installed") == "true"
+	compatibleOnly := r.URL.Query().Get("compatible") == "true"
+	deviceID := strings.TrimSpace(r.URL.Query().Get("deviceID"))
+	deviceAuthorized := false
+	if deviceID != "" {
+		if scoped, err := DeviceFromContext(r.Context()); err == nil {
+			deviceAuthorized = scoped.ID == deviceID
+		} else if user := GetUser(r); user != nil {
+			count, _ := gorm.G[data.Device](s.DB).Where("id = ? AND username = ?", deviceID, user.Username).Count(r.Context(), "*")
+			deviceAuthorized = count == 1
+		}
+	}
+	installedIDs := map[string]bool{}
+	if (installedOnly || r.URL.Query().Has("installed")) && deviceAuthorized {
+		appsForDevice, _ := gorm.G[data.App](s.DB).Where("device_id = ? AND pushed = ?", deviceID, false).Find(r.Context())
+		for _, app := range appsForDevice {
+			installedIDs[app.Name] = true
+		}
+	}
 	filtered := make([]catalogueApp, 0, len(items))
 	for _, item := range items {
+		item.Installed = installedIDs[item.ID] || installedIDs[item.Name]
+		if deviceAuthorized {
+			compatible := true
+			item.Compatible = &compatible
+		}
 		if search != "" && !strings.Contains(strings.ToLower(item.Name+" "+item.Description+" "+item.Author+" "+strings.Join(item.Tags, " ")), search) {
 			continue
 		}
@@ -344,7 +451,24 @@ func (s *Server) handleCatalogueList(w http.ResponseWriter, r *http.Request) {
 		if repository != "" && strings.ToLower(item.Repository) != repository {
 			continue
 		}
+		if locationAware && !item.LocationAware {
+			continue
+		}
+		if sports && !(containsFold(item.Tags, "sports") || strings.EqualFold(item.Category, "sports")) {
+			continue
+		}
+		if installedOnly && !item.Installed {
+			continue
+		}
+		if compatibleOnly && (item.Compatible == nil || !*item.Compatible) {
+			continue
+		}
 		filtered = append(filtered, item)
+	}
+	if r.URL.Query().Get("sort") == "recent" {
+		sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].Updated > filtered[j].Updated })
+	} else if r.URL.Query().Get("sort") == "featured" {
+		sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].Featured && !filtered[j].Featured })
 	}
 	offset := 0
 	if value := r.URL.Query().Get("offset"); value != "" {
@@ -379,7 +503,10 @@ func (s *Server) handleCatalogueList(w http.ResponseWriter, r *http.Request) {
 		nextOffset = &value
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"apps": filtered[offset:end], "offset": offset, "limit": limit, "total": total, "nextOffset": nextOffset})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"apps": filtered[offset:end], "offset": offset, "limit": limit, "total": total, "nextOffset": nextOffset,
+		"repositoryRevision": revision, "iconRevision": revision, "schemaVersion": "1",
+	})
 }
 
 func (s *Server) handleCatalogueDetail(w http.ResponseWriter, r *http.Request) {
@@ -428,8 +555,17 @@ func (s *Server) handleCatalogueSchema(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCatalogueIcon(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	s.metrics.catalogueIconActive.Inc()
+	result := "success"
+	defer func() {
+		s.metrics.catalogueIconActive.Dec()
+		s.metrics.catalogueIconTotal.WithLabelValues(result).Inc()
+		s.metrics.catalogueIconDuration.Observe(time.Since(started).Seconds())
+	}()
 	item, err := s.findCatalogueApp(GetUser(r), r.PathValue("appID"))
 	if err != nil {
+		result = "not_found"
 		http.NotFound(w, r)
 		return
 	}
@@ -438,12 +574,46 @@ func (s *Server) handleCatalogueIcon(w http.ResponseWriter, r *http.Request) {
 		file = item.meta.Preview2x
 	}
 	if file == "" {
+		result = "not_found"
 		http.NotFound(w, r)
 		return
 	}
 	path, err := securejoin.SecureJoin(filepath.Join(s.DataDir, filepath.Dir(item.meta.Path)), file)
 	if err != nil {
+		result = "invalid_path"
 		http.NotFound(w, r)
+		return
+	}
+	stat, err := os.Stat(path)
+	if err != nil || stat.IsDir() {
+		result = "not_found"
+		http.NotFound(w, r)
+		return
+	}
+	if stat.Size() <= 0 || stat.Size() > catalogueIconMaxBytes {
+		result = "invalid_image"
+		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_icon", "Catalogue icon exceeds safe decode limits", nil)
+		return
+	}
+	icon, err := os.Open(path)
+	if err != nil {
+		result = "not_found"
+		http.NotFound(w, r)
+		return
+	}
+	config, _, decodeErr := image.DecodeConfig(io.LimitReader(icon, catalogueIconMaxBytes+1))
+	_ = icon.Close()
+	if decodeErr != nil || config.Width <= 0 || config.Height <= 0 || config.Width > 4096 || config.Height > 4096 || config.Width*config.Height > catalogueIconMaxPixels {
+		result = "invalid_image"
+		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_icon", "Catalogue icon could not be decoded safely", nil)
+		return
+	}
+	etag := fmt.Sprintf(`W/"%x-%x"`, stat.ModTime().UnixNano(), stat.Size())
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "private, max-age=3600, stale-while-revalidate=86400")
+	if r.Header.Get("If-None-Match") == etag {
+		result = "not_modified"
+		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 	http.ServeFile(w, r, path)
@@ -500,8 +670,15 @@ func normalizeConfigValue(field *normalizedSchemaField, value any) (any, error) 
 		}
 		return nil, errors.New("is not an allowed option")
 	case "string", "secret", "colour", "date", "time", "datetime":
-		if _, ok := value.(string); !ok {
+		text, ok := value.(string)
+		if !ok {
 			return nil, errors.New("must be a string")
+		}
+		if field.Pattern != "" {
+			pattern, err := regexp.Compile(field.Pattern)
+			if err == nil && !pattern.MatchString(text) {
+				return nil, errors.New("does not match the required format")
+			}
 		}
 	}
 	return value, nil
@@ -512,10 +689,21 @@ func validateConfigPatch(schema normalizedSchema, existing, patch map[string]any
 	for key, value := range existing {
 		result[key] = value
 	}
+	if findSchemaField(schema, "show_team_colored_logo_background") != nil {
+		if _, canonicalPresent := result["show_team_colored_logo_background"]; !canonicalPresent {
+			if legacy, present := result["show_team_coloured_logo_background"]; present {
+				result["show_team_colored_logo_background"] = legacy
+			}
+		}
+		delete(result, "show_team_coloured_logo_background")
+	}
 	fieldErrors := map[string]string{}
 	for key, value := range patch {
 		field := findSchemaField(schema, key)
 		if field == nil {
+			if current, exists := existing[key]; exists && reflect.DeepEqual(current, value) {
+				continue
+			}
 			fieldErrors[key] = "unknown configuration field"
 			continue
 		}

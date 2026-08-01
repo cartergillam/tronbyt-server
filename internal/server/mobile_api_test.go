@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -129,6 +130,82 @@ func TestMobilePreviewAuthorizationAndMissing(t *testing.T) {
 			assert.Equal(t, test.status, rr.Code)
 		})
 	}
+}
+
+func TestInstallationPreviewIsScopedToRealInstallation(t *testing.T) {
+	s := newTestServerAPI(t)
+	ctx := context.Background()
+	path := "system-apps/apps/clock/clock.star"
+	app := data.App{DeviceID: "testdevice", Iname: "clock-main", Name: "clock", Path: &path, Enabled: true}
+	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &app))
+	dir := filepath.Join(s.DataDir, "webp", "testdevice")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	content := []byte("RIFF-installation-preview")
+	require.NoError(t, os.WriteFile(s.getAppWebpPath(dir, &app), content, 0o644))
+
+	req := newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations/clock-main/preview", "device_api_key", nil)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, content, rr.Body.Bytes())
+	assert.NotEmpty(t, rr.Header().Get("ETag"))
+
+	req = newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations/missing/preview", "device_api_key", nil)
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+func TestCapabilitiesDetectAuthorizationScope(t *testing.T) {
+	s := newTestServerAPI(t)
+	for _, test := range []struct {
+		name, key, scope string
+	}{
+		{name: "device key", key: "device_api_key", scope: "device"},
+		{name: "user key", key: "test_api_key", scope: "user"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req := newAPIRequest(http.MethodGet, "/v0/capabilities", test.key, nil)
+			rr := httptest.NewRecorder()
+			s.ServeHTTP(rr, req)
+			require.Equal(t, http.StatusOK, rr.Code)
+			var payload capabilityResponse
+			require.NoError(t, json.NewDecoder(rr.Body).Decode(&payload))
+			assert.Equal(t, test.scope, payload.AuthorizationScope)
+			assert.Contains(t, payload.Features, "device-diagnostics")
+			assert.NotEmpty(t, payload.IconRevision)
+		})
+	}
+}
+
+func TestDeviceDiagnosticsAreScopedAndSanitized(t *testing.T) {
+	s := newTestServerAPI(t)
+	ctx := context.Background()
+	path := "system-apps/apps/test/test.star"
+	app := data.App{
+		DeviceID: "testdevice", Iname: "clock-main", Name: "clock", Path: &path,
+		Enabled: true, LastRenderResult: "failure", LastRenderMessage: "https://private.example/render?token=secret-value",
+	}
+	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &app))
+	s.diagnosticsEvents.add("testdevice", "render_failure", "token=secret-value", app.Iname)
+
+	req := newAPIRequest(http.MethodGet, "/v0/devices/testdevice/diagnostics", "device_api_key", nil)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.NotContains(t, rr.Body.String(), "secret-value")
+	var payload deviceDiagnostics
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&payload))
+	assert.Equal(t, "testdevice", payload.DeviceID)
+	require.Len(t, payload.Apps, 1)
+	assert.Equal(t, "failure", payload.Apps[0].RenderResult)
+
+	other := data.Device{ID: "otherdevice", Username: "otheruser", Name: "Other", APIKey: "other_key"}
+	require.NoError(t, gorm.G[data.Device](s.DB).Create(ctx, &other))
+	req = newAPIRequest(http.MethodGet, "/v0/devices/otherdevice/diagnostics", "device_api_key", nil)
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusNotFound, rr.Code)
 }
 
 func TestDeviceKeyListsOnlyAuthorizedDevice(t *testing.T) {
@@ -260,6 +337,32 @@ func TestCatalogueListingFiltersAndPagination(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Contains(t, rr.Body.String(), `"id":"custom-clock"`)
 	assert.Contains(t, rr.Body.String(), `"repository":"custom-repository"`)
+}
+
+func TestCatalogueIconCachingAndDecodeLimits(t *testing.T) {
+	s := newTestServerAPI(t)
+	dir := filepath.Join(s.DataDir, "system-apps", "apps", "icon-test")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	pngBytes, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "icon.png"), pngBytes, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "broken.png"), []byte("not an image"), 0o644))
+	s.systemAppsCache = []apps.AppMetadata{
+		{Manifest: apps.Manifest{ID: "icon-test", Name: "Icon Test"}, Path: "system-apps/apps/icon-test/icon-test.star", Preview: "icon.png"},
+		{Manifest: apps.Manifest{ID: "broken-icon", Name: "Broken Icon"}, Path: "system-apps/apps/icon-test/broken-icon.star", Preview: "broken.png"},
+	}
+
+	req := newAPIRequest(http.MethodGet, "/v0/catalogue/icon-test/icon", "device_api_key", nil)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NotEmpty(t, rr.Header().Get("ETag"))
+	assert.Contains(t, rr.Header().Get("Cache-Control"), "stale-while-revalidate")
+
+	req = newAPIRequest(http.MethodGet, "/v0/catalogue/broken-icon/icon", "device_api_key", nil)
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
 }
 
 func seedRenderableCatalogueApp(t *testing.T, s *Server) {
@@ -471,6 +574,8 @@ func TestDeletingPinnedAndDisplayedInstallationClearsDeviceReferences(t *testing
 	ctx := context.Background()
 	app := data.App{DeviceID: "testdevice", Iname: "clock", Name: "clock", Enabled: true}
 	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &app))
+	fallback := data.App{DeviceID: "testdevice", Iname: "weather", Name: "weather", Enabled: true}
+	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &fallback))
 	_, err := gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").
 		Select("PinnedApp", "DisplayingApp", "DisplayRestoreApp").
 		Updates(ctx, data.Device{

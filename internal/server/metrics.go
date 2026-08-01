@@ -17,12 +17,15 @@ import (
 
 // appMetrics holds all application-specific Prometheus metrics.
 type appMetrics struct {
-	renderTotal      *prometheus.CounterVec
-	renderDuration   prometheus.Histogram
-	devicePolls      prometheus.Counter
-	wsConnections    prometheus.Gauge
-	httpRequestTotal *prometheus.CounterVec
-	httpRequestDur   prometheus.Histogram
+	renderTotal           *prometheus.CounterVec
+	renderDuration        prometheus.Histogram
+	devicePolls           prometheus.Counter
+	wsConnections         prometheus.Gauge
+	httpRequestTotal      *prometheus.CounterVec
+	httpRequestDur        prometheus.Histogram
+	catalogueIconActive   prometheus.Gauge
+	catalogueIconTotal    *prometheus.CounterVec
+	catalogueIconDuration prometheus.Histogram
 }
 
 func dbCount[T any](db *gorm.DB) float64 {
@@ -78,6 +81,9 @@ func (s *Server) registerMetrics() {
 				Buckets:   prometheus.DefBuckets,
 			},
 		),
+		catalogueIconActive:   prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "tronbyt", Name: "catalogue_icon_requests_active", Help: "Current catalogue icon requests."}),
+		catalogueIconTotal:    prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: "tronbyt", Name: "catalogue_icon_requests_total", Help: "Catalogue icon requests by result."}, []string{"result"}),
+		catalogueIconDuration: prometheus.NewHistogram(prometheus.HistogramOpts{Namespace: "tronbyt", Name: "catalogue_icon_request_duration_seconds", Help: "Catalogue icon request duration.", Buckets: prometheus.DefBuckets}),
 	}
 
 	users := prometheus.NewGaugeFunc(
@@ -124,6 +130,9 @@ func (s *Server) registerMetrics() {
 		m.wsConnections,
 		m.httpRequestTotal,
 		m.httpRequestDur,
+		m.catalogueIconActive,
+		m.catalogueIconTotal,
+		m.catalogueIconDuration,
 		users,
 		devices,
 		devicesActive,

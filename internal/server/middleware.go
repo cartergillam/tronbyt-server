@@ -103,6 +103,46 @@ func (s *Server) APIAuthMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// CatalogueAuthMiddleware authenticates catalogue reads without preloading
+// every device and installation. Catalogue/icon traffic must stay lightweight
+// so it cannot starve physical frame polling.
+func (s *Server) CatalogueAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+		if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+			authHeader = strings.TrimSpace(authHeader[7:])
+		}
+		if authHeader == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		user, err := gorm.G[data.User](s.DB).Where("api_key = ?", authHeader).First(r.Context())
+		if err == nil {
+			ctx := context.WithValue(r.Context(), userContextKey, &user)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		device, err := gorm.G[data.Device](s.DB).Where("api_key = ?", authHeader).First(r.Context())
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		owner, err := gorm.G[data.User](s.DB).Where("username = ?", device.Username).First(r.Context())
+		if err != nil {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		owner.Devices = []data.Device{device}
+		ctx := context.WithValue(r.Context(), userContextKey, &owner)
+		ctx = context.WithValue(ctx, deviceContextKey, &device)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 // RequireLogin authenticates Web UI requests via session cookie.
 func (s *Server) RequireLogin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
