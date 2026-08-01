@@ -1,0 +1,54 @@
+name: tronbyt-rehearsal
+
+services:
+  web:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: production
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${REHEARSAL_PORT:-18000}:8000"
+    volumes:
+      - rehearsal-data:/app/data
+      - ../../../tronbyt-apps:/app/data/system-apps:ro
+    environment:
+      DB_DSN: /app/data/tronbyt.db
+      DATA_DIR: /app/data
+      ENABLE_PPROF: "true"
+      ENABLE_UPDATE_CHECKS: "false"
+      ENABLE_USER_REGISTRATION: "false"
+      LOG_FORMAT: json
+      LOG_LEVEL: INFO
+      PRODUCTION: "false"
+      SINGLE_USER_AUTO_LOGIN: "false"
+      SYSTEM_APPS_AUTO_REFRESH: "false"
+      SYSTEM_APPS_REPO: https://github.com/cartergillam/apps.git
+      TRONBYT_PUSH_CLEANUP_DRY_RUN: "${TRONBYT_PUSH_CLEANUP_DRY_RUN:-false}"
+    healthcheck:
+      test: ["CMD", "/app/tronbyt-server", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  tools:
+    profiles: ["tools"]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: rehearsal
+    volumes:
+      - rehearsal-data:/app/data
+      - ../../../tronbyt-apps:/app/data/system-apps:ro
+      - ./backups:/backups
+    environment:
+      DATA_DIR: /app/data
+      REHEARSAL_BASE_URL: http://web:8000
+      REHEARSAL_DEVICE_ID: rehearsal-display
+      REHEARSAL_DEVICE_KEY: rehearsal-device-key
+      REHEARSAL_USER_KEY: rehearsal-user-key
+
+volumes:
+  rehearsal-data:

@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -177,4 +178,211 @@ func TestDeviceEventTimelineIsBoundedAndRecordsHealthTransitions(t *testing.T) {
 	require.Len(t, events, 3)
 	assert.Equal(t, "device_resumed", events[0].Type)
 	assert.Equal(t, "device_stale", events[1].Type)
+}
+
+// The production-lineage fixtures intentionally describe only the columns
+// written by an older server. Values are synthetic and contain no exported
+// production identifiers, credentials, or location precision.
+type productionLineageUser struct {
+	Username string `gorm:"primaryKey"`
+	Password string
+	APIKey   string `gorm:"uniqueIndex"`
+}
+
+func (productionLineageUser) TableName() string { return "users" }
+
+type productionLineageDevice struct {
+	ID                  string `gorm:"primaryKey"`
+	Username            string `gorm:"index"`
+	Name                string
+	Type                data.DeviceType `gorm:"type:text"`
+	APIKey              string          `gorm:"uniqueIndex"`
+	Brightness          data.Brightness
+	NightModeEnabled    bool
+	NightModeApp        string
+	NightStart          string
+	NightEnd            string
+	NightBrightness     data.Brightness
+	DefaultInterval     int
+	Timezone            *string
+	Location            data.DeviceLocation `gorm:"type:text"`
+	LastAppIndex        int
+	DisplayingApp       *string
+	DisplayRestoreApp   *string
+	PinnedApp           *string
+	InterstitialEnabled bool
+	InterstitialApp     *string
+	RequireAPIKey       bool
+}
+
+func (productionLineageDevice) TableName() string { return "devices" }
+
+type productionLineageApp struct {
+	ID              uint   `gorm:"primaryKey"`
+	DeviceID        string `gorm:"index:idx_device_order,priority:1;uniqueIndex:idx_device_iname,priority:1;type:string"`
+	Iname           string `gorm:"uniqueIndex:idx_device_iname,priority:2"`
+	Name            string
+	UInterval       int
+	DisplayTime     int
+	Enabled         bool
+	Pushed          bool
+	Order           int `gorm:"index:idx_device_order,priority:2"`
+	LastRender      time.Time
+	Path            *string
+	Config          data.JSONMap `gorm:"type:text"`
+	EmptyLastRender bool
+}
+
+func (productionLineageApp) TableName() string { return "apps" }
+
+func TestProductionLineageMigrationAndCleanupRehearsal(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "production-lineage.db")
+	openDB := func() *gorm.DB {
+		db, err := gorm.Open(sqlite.Open(dbPath+"?_busy_timeout=5000"), &gorm.Config{})
+		require.NoError(t, err)
+		return db
+	}
+
+	legacyDB := openDB()
+	require.NoError(t, legacyDB.AutoMigrate(
+		&productionLineageUser{},
+		&productionLineageDevice{},
+		&productionLineageApp{},
+	))
+	require.False(t, legacyDB.Migrator().HasColumn(&productionLineageApp{}, "push_kind"))
+	require.False(t, legacyDB.Migrator().HasColumn(&productionLineageApp{}, "last_render_result"))
+
+	timezone := "America/Toronto"
+	missingIname := "missing-push"
+	legacyStablePath := "pushed:legacy-stable"
+	missingPath := "pushed:missing-file"
+	temporaryPath := "pushed:__current-show-now"
+	user := productionLineageUser{
+		Username: "rehearsal-user",
+		Password: "synthetic-password-hash",
+		APIKey:   "synthetic-user-key",
+	}
+	device := productionLineageDevice{
+		ID:                  "fixture-device",
+		Username:            user.Username,
+		Name:                "Migration Rehearsal",
+		Type:                data.DeviceMatrixPortal,
+		APIKey:              "synthetic-device-key",
+		Brightness:          62,
+		NightModeEnabled:    true,
+		NightModeApp:        "clock",
+		NightStart:          "22:00",
+		NightEnd:            "07:00",
+		NightBrightness:     8,
+		DefaultInterval:     15,
+		Timezone:            &timezone,
+		Location:            data.DeviceLocation{Description: "Fixture City, Canada", Locality: "Fixture City", Country: "Canada", Lat: 43.1, Lng: -79.9, Timezone: timezone},
+		LastAppIndex:        99,
+		DisplayingApp:       &missingIname,
+		DisplayRestoreApp:   &missingIname,
+		InterstitialEnabled: true,
+		InterstitialApp:     &missingIname,
+		RequireAPIKey:       true,
+	}
+	apps := []productionLineageApp{
+		{DeviceID: device.ID, Iname: "clock", Name: "Clock", Enabled: true, Order: 0, Config: data.JSONMap{"timezone": "__device__"}},
+		{DeviceID: device.ID, Iname: "mlb-game", Name: "MLB Game", Enabled: true, Order: 1, Config: data.JSONMap{"team": "TOR", "gameday_only": "true"}},
+		{DeviceID: device.ID, Iname: "legacy-push", Name: "pushed", Enabled: true, Pushed: true, Order: 2, Path: &legacyStablePath},
+		{DeviceID: device.ID, Iname: missingIname, Name: "pushed", Enabled: true, Pushed: true, Order: 3, Path: &missingPath},
+		{DeviceID: device.ID, Iname: "temporary-row", Name: "pushed", Enabled: true, Pushed: true, Order: 4, Path: &temporaryPath},
+	}
+	require.NoError(t, legacyDB.Create(&user).Error)
+	require.NoError(t, legacyDB.Create(&device).Error)
+	require.NoError(t, legacyDB.Create(&apps).Error)
+
+	pushedDir := filepath.Join(root, "webp", device.ID, "pushed")
+	require.NoError(t, os.MkdirAll(pushedDir, 0o755))
+	for _, name := range []string{"legacy-stable.webp", "orphan-stable.webp", "__current-show-now.webp", "__expired-show-now.webp"} {
+		require.NoError(t, os.WriteFile(filepath.Join(pushedDir, name), []byte("synthetic "+name), 0o644))
+	}
+	expired := time.Now().Add(-temporaryPushMaximumAge - time.Hour)
+	require.NoError(t, os.Chtimes(filepath.Join(pushedDir, "__expired-show-now.webp"), expired, expired))
+
+	legacySQL, err := legacyDB.DB()
+	require.NoError(t, err)
+	require.NoError(t, legacySQL.Close())
+
+	db := openDB()
+	require.NoError(t, db.AutoMigrate(
+		&data.User{},
+		&data.Device{},
+		&data.App{},
+		&data.WebAuthnCredential{},
+		&data.Setting{},
+		&data.OIDCIdentity{},
+	))
+	require.True(t, db.Migrator().HasColumn(&data.App{}, "push_kind"))
+	require.True(t, db.Migrator().HasColumn(&data.App{}, "last_render_result"))
+	require.True(t, db.Migrator().HasColumn(&data.App{}, "next_render_at"))
+
+	s := &Server{DB: db, DataDir: root, diagnosticsEvents: newDeviceEventTimeline(20)}
+	var beforeApps int64
+	require.NoError(t, db.Model(&data.App{}).Count(&beforeApps).Error)
+	beforeDevice, err := gorm.G[data.Device](db).Where("id = ?", device.ID).First(ctx)
+	require.NoError(t, err)
+
+	dryRun, err := s.inspectOrCleanupPushLifecycle(ctx, true)
+	require.NoError(t, err)
+	assert.Equal(t, 1, dryRun.LegacyRowsMigrated)
+	assert.Equal(t, 2, dryRun.StaleRowsRemoved)
+	assert.Equal(t, 1, dryRun.OrphanFilesRemoved)
+	assert.Equal(t, 1, dryRun.StaleTemporaryFiles)
+	var afterDryRunApps int64
+	require.NoError(t, db.Model(&data.App{}).Count(&afterDryRunApps).Error)
+	assert.Equal(t, beforeApps, afterDryRunApps)
+	afterDryRunDevice, err := gorm.G[data.Device](db).Where("id = ?", device.ID).First(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, beforeDevice.DisplayingApp, afterDryRunDevice.DisplayingApp)
+	for _, name := range []string{"legacy-stable.webp", "orphan-stable.webp", "__current-show-now.webp", "__expired-show-now.webp"} {
+		_, statErr := os.Stat(filepath.Join(pushedDir, name))
+		require.NoError(t, statErr, "dry-run must preserve %s", name)
+	}
+
+	realRun, err := s.inspectOrCleanupPushLifecycle(ctx, false)
+	require.NoError(t, err)
+	assert.Equal(t, dryRun, realRun)
+	var migrated []data.App
+	require.NoError(t, db.Where("device_id = ?", device.ID).Order("`order`").Find(&migrated).Error)
+	assert.Equal(t, []string{"clock", "mlb-game", "legacy-push"}, []string{migrated[0].Iname, migrated[1].Iname, migrated[2].Iname})
+	assert.Equal(t, persistentPushKind, migrated[2].PushKind)
+
+	migratedDevice, err := gorm.G[data.Device](db).Where("id = ?", device.ID).First(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, migratedDevice.DisplayingApp)
+	assert.Nil(t, migratedDevice.DisplayRestoreApp)
+	assert.Nil(t, migratedDevice.InterstitialApp)
+	assert.False(t, migratedDevice.InterstitialEnabled)
+	assert.Equal(t, "clock", migratedDevice.NightModeApp)
+	assert.Equal(t, timezone, migratedDevice.Location.Timezone)
+	assert.Equal(t, "Fixture City", migratedDevice.Location.Locality)
+	assert.Zero(t, migratedDevice.LastAppIndex)
+
+	_, err = os.Stat(filepath.Join(pushedDir, "legacy-stable.webp"))
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(pushedDir, "__current-show-now.webp"))
+	require.NoError(t, err)
+	for _, name := range []string{"orphan-stable.webp", "__expired-show-now.webp"} {
+		_, statErr := os.Stat(filepath.Join(pushedDir, name))
+		assert.True(t, os.IsNotExist(statErr), "%s should be removed", name)
+	}
+
+	// An older binary selecting only its known columns can still read ordinary
+	// installations after the additive migration.
+	var legacyReadable []productionLineageApp
+	require.NoError(t, db.Where("device_id = ? AND pushed = ?", device.ID, false).Order("`order`").Find(&legacyReadable).Error)
+	assert.Equal(t, []string{"clock", "mlb-game"}, []string{legacyReadable[0].Iname, legacyReadable[1].Iname})
+
+	second, err := s.inspectOrCleanupPushLifecycle(ctx, false)
+	require.NoError(t, err)
+	assert.Zero(t, second.LegacyRowsMigrated)
+	assert.Zero(t, second.StaleRowsRemoved)
+	assert.Zero(t, second.OrphanFilesRemoved)
+	assert.Zero(t, second.StaleTemporaryFiles)
 }

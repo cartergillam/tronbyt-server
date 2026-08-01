@@ -53,7 +53,7 @@ RUN ln -s /app/tronbyt-server boot \
     && ln -s /app/tronbyt-server app/migrate
 
 # --- Runtime Stage ---
-FROM scratch
+FROM scratch AS production
 
 WORKDIR /app
 
@@ -75,3 +75,24 @@ ENV DATA_DIR=data
 
 # Default command to execute the main server binary
 CMD ["/app/tronbyt-server"]
+
+# Rehearsal-only utility image. This target is separate from production so
+# local seed, backup, poll and load tooling is never shipped in the server
+# runtime image.
+FROM build-production AS build-rehearsal
+WORKDIR /app
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=1 xx-go build \
+    -tags gzip_fonts \
+    -o build/app/tronbyt-rehearsal \
+    ./cmd/rehearsal
+
+FROM scratch AS rehearsal
+WORKDIR /app
+COPY --from=build-rehearsal /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build-rehearsal /app/build/app/tronbyt-rehearsal /app/tronbyt-rehearsal
+ENTRYPOINT ["/app/tronbyt-rehearsal"]
+
+# Preserve the historical default `docker build .` result.
+FROM production AS final
