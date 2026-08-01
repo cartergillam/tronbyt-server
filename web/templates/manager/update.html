@@ -545,6 +545,9 @@
                                value="{{ .Device.APIKey }}"
                                oninput="updateExampleCommands()"
                                class="settings-input settings-input-wide">
+                        <p class="settings-help-text">
+                            This is a device-scoped key. Physical firmware must use this key, never a user-level key. Changing it invalidates the board's saved authenticated Image URL; after saving, securely copy the complete replacement Image URL shown above into the firmware configuration.
+                        </p>
                     </div>
                 </div>
                 <div class="settings-field-row">
