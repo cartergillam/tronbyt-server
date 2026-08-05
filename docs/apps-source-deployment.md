@@ -11,7 +11,7 @@ environment used by Docker Compose:
 ```dotenv
 SYSTEM_APPS_REPO=https://github.com/cartergillam/apps.git
 SYSTEM_APPS_REF=feature/mlb-clock-reliability
-SYSTEM_APPS_EXPECTED_COMMIT=bbfcff4e02aae5ea50e60a961a5456e7af329da5
+SYSTEM_APPS_EXPECTED_COMMIT=abf24de2bc5b23b296ad755dddbf71b05f507f73
 ```
 
 Commit `bbfcff4e0` contains Clock commit `bbfcff4e0` and has MLB commit
