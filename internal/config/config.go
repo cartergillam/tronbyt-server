@@ -19,6 +19,8 @@ type Settings struct {
 	SingleUserAutoLogin    bool   `env:"SINGLE_USER_AUTO_LOGIN"`
 	SystemAppsAutoRefresh  bool   `env:"SYSTEM_APPS_AUTO_REFRESH"`
 	SystemAppsRepo         string `env:"SYSTEM_APPS_REPO"         envDefault:"https://github.com/tronbyt/apps.git"`
+	SystemAppsRef          string `env:"SYSTEM_APPS_REF"          envDefault:"main"`
+	SystemAppsExpectedSHA  string `env:"SYSTEM_APPS_EXPECTED_COMMIT"`
 	GitHubToken            string `env:"GITHUB_TOKEN"`
 	RedisURL               string `env:"REDIS_URL"`
 	Host                   string `env:"TRONBYT_HOST"             envDefault:""`
@@ -26,7 +28,7 @@ type Settings struct {
 	UnixSocket             string `env:"TRONBYT_UNIX_SOCKET"`
 	SSLKeyFile             string `env:"TRONBYT_SSL_KEYFILE"`
 	SSLCertFile            string `env:"TRONBYT_SSL_CERTFILE"`
-	TrustedProxies         string `env:"TRONBYT_TRUSTED_PROXIES"  envDefault:"*"`
+	TrustedProxies         string `env:"TRONBYT_TRUSTED_PROXIES"`
 	LogLevel               string `env:"LOG_LEVEL"                envDefault:"INFO"`
 	LogFormat              string `env:"LOG_FORMAT"               envDefault:"text"`
 	EnableUpdateChecks     bool   `env:"ENABLE_UPDATE_CHECKS"     envDefault:"true"`
@@ -41,10 +43,20 @@ type Settings struct {
 	OIDCAdminGroupClaim string `env:"OIDC_ADMIN_GROUP_CLAIM" envDefault:"groups"`
 	OIDCAdminGroupValue string `env:"OIDC_ADMIN_GROUP_VALUE"`
 	OIDCUsernameClaim   string `env:"OIDC_USERNAME_CLAIM"    envDefault:"preferred_username"`
+
+	systemAppsRepoExplicit bool
 }
 
 func (s *Settings) SystemAppsDir() string {
 	return filepath.Join(s.DataDir, "system-apps")
+}
+
+// SystemAppsRepoExplicit reports whether deployment configuration supplied the
+// repository URL. An explicit environment value takes precedence over the
+// legacy database setting so the checkout used at startup cannot disagree with
+// the source advertised by the running server.
+func (s *Settings) SystemAppsRepoExplicit() bool {
+	return s != nil && s.systemAppsRepoExplicit
 }
 
 // TemplateConfig holds configuration values needed in templates.
@@ -67,6 +79,7 @@ func LoadSettings() (*Settings, error) {
 	if err := env.Parse(&cfg); err != nil {
 		return nil, err
 	}
+	_, cfg.systemAppsRepoExplicit = os.LookupEnv("SYSTEM_APPS_REPO")
 
 	return &cfg, nil
 }

@@ -137,6 +137,21 @@ func TestClassifyRenderResultBoundaries(t *testing.T) {
 		assert.Equal(t, boundary, *next)
 	})
 
+	t.Run("final second keeps exact minute boundary", func(t *testing.T) {
+		at125959 := time.Date(2026, time.July, 31, 16, 34, 59, 250_000_000, time.UTC)
+		at123500 := time.Date(2026, time.July, 31, 16, 35, 0, 0, time.UTC)
+		result, _, next := classifyRenderResult(
+			at125959,
+			[]byte("12:34"),
+			[]string{nextRenderMarker + at123500.Format(time.RFC3339)},
+			nil,
+			1,
+		)
+		assert.Equal(t, "visible", result)
+		require.NotNil(t, next)
+		assert.Equal(t, at123500, *next)
+	})
+
 	t.Run("no game retries quickly", func(t *testing.T) {
 		result, _, next := classifyRenderResult(now, nil, []string{"--- APPLET HIDDEN FROM ROTATION (NO GAME TODAY) ---"}, nil, 360)
 		assert.Equal(t, "hidden", result)
@@ -162,6 +177,19 @@ func TestClassifyRenderResultBoundaries(t *testing.T) {
 		require.NotNil(t, next)
 		assert.Equal(t, now.Add(2*time.Minute), *next)
 	})
+}
+
+func TestClockRenderDueAndBoundaryDwell(t *testing.T) {
+	boundary := time.Date(2026, time.November, 1, 6, 0, 0, 0, time.UTC)
+	lastRender := boundary.Add(-30 * time.Second)
+	app := &data.App{LastRender: lastRender, UInterval: 15, NextRenderAt: &boundary}
+
+	assert.False(t, renderDue(boundary.Add(-time.Nanosecond), app), "cached frame remains valid before its exact boundary")
+	assert.True(t, renderDue(boundary, app), "delayed or exact-boundary polling must invalidate the cached minute")
+	assert.True(t, renderDue(boundary.Add(8*time.Second), app), "a delayed poll must render the current minute")
+	assert.Equal(t, 1, effectiveFrameDwell(boundary.Add(-750*time.Millisecond), 15, app))
+	assert.Equal(t, 10, effectiveFrameDwell(boundary.Add(-10*time.Second), 15, app))
+	assert.Equal(t, 15, effectiveFrameDwell(boundary.Add(-30*time.Second), 15, app))
 }
 
 func TestDeviceEventTimelineIsBoundedAndRecordsHealthTransitions(t *testing.T) {

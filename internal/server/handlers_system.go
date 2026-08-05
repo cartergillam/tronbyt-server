@@ -3,16 +3,19 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"tronbyt-server/internal/data"
 	"tronbyt-server/internal/gitutils"
 	"tronbyt-server/internal/version"
 
 	"golang.org/x/mod/semver"
+	"gorm.io/gorm"
 )
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -87,9 +90,24 @@ func (s *Server) autoRefreshSystemRepo() {
 func (s *Server) refreshSystemRepo() error {
 	repoURL := s.Config.SystemAppsRepo
 	appsPath := filepath.Join(s.DataDir, "system-apps")
-	if err := gitutils.EnsureRepo(appsPath, repoURL, s.Config.GitHubToken, true); err != nil {
+	info, err := gitutils.EnsureRepoAtRef(
+		appsPath, repoURL, s.Config.SystemAppsRef,
+		s.Config.SystemAppsExpectedSHA, s.Config.GitHubToken, true,
+	)
+	if err != nil {
+		slog.Error("System apps refresh failed", "repository", repoURL, "ref", s.Config.SystemAppsRef, "update_succeeded", false, "error", err)
 		return err
 	}
+	slog.Info("System apps refresh complete", "repository", info.URL, "ref", info.Branch, "commit", info.CommitHash, "update_succeeded", true)
+	s.systemAppsInfo.Store(info)
+	invalidated, err := gorm.G[data.App](s.DB).
+		Where("path LIKE ?", "%system-apps/%").
+		Select("LastRender", "NextRenderAt").
+		Updates(context.Background(), data.App{LastRender: time.Time{}, NextRenderAt: nil})
+	if err != nil {
+		return fmt.Errorf("invalidate system-app renders: %w", err)
+	}
+	slog.Info("System app renders invalidated", "installations", invalidated, "commit", info.CommitHash)
 
 	s.RefreshSystemAppsCache()
 	return nil

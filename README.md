@@ -105,6 +105,8 @@ The server can be configured via environment variables or `.env` file:
 *   `MAX_USERS`: Maximum number of user accounts (default: `0` / unlimited).
 *   `SINGLE_USER_AUTO_LOGIN`: Skip login when only one user exists (default: `false`).
 *   `SYSTEM_APPS_REPO`: Git repository URL for system apps (default: `https://github.com/tronbyt/apps.git`).
+*   `SYSTEM_APPS_REF`: Branch used for the system-apps checkout (default: `main`).
+*   `SYSTEM_APPS_EXPECTED_COMMIT`: Optional full SHA or prefix. Production startup and refresh fail if the resolved checkout does not match.
 *   `SYSTEM_APPS_AUTO_REFRESH`: Automatically refresh the system apps repository (default: `false`).
 *   `GITHUB_TOKEN`: GitHub token for private app repositories (optional).
 *   `REDIS_URL`: Redis connection string for caching (optional).

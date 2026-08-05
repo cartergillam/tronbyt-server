@@ -169,12 +169,7 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 
 	// 3. Starlark App - Check interval or an app-provided eligibility boundary.
 	now := time.Now()
-	shouldRender := app.LastRender.IsZero() || app.LastRender.After(now.Add(5*time.Minute))
-	if !shouldRender && app.NextRenderAt != nil {
-		shouldRender = !now.Before(*app.NextRenderAt)
-	} else if !shouldRender {
-		shouldRender = now.Sub(app.LastRender) > time.Duration(app.UInterval)*time.Minute
-	}
+	shouldRender := renderDue(now, app)
 	if shouldRender {
 		slog.Info("Rendering app", "app", appBasename)
 
@@ -285,6 +280,16 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 	return true // Not time to render yet, assume existing is fine
 }
 
+func renderDue(now time.Time, app *data.App) bool {
+	if app == nil || app.LastRender.IsZero() || app.LastRender.After(now.Add(5*time.Minute)) {
+		return true
+	}
+	if app.NextRenderAt != nil {
+		return !now.Before(*app.NextRenderAt)
+	}
+	return now.Sub(app.LastRender) > time.Duration(app.UInterval)*time.Minute
+}
+
 const (
 	nextRenderMarker    = "TRONBYT-NEXT-RENDER:"
 	hiddenUntilMarker   = "TRONBYT-HIDDEN-UNTIL:"
@@ -349,7 +354,10 @@ func classifyRenderResult(now time.Time, image []byte, messages []string, render
 
 func parseBoundedRenderTime(now time.Time, value string) *time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
-	if err != nil || parsed.Before(now.Add(5*time.Second)) || parsed.After(now.Add(24*time.Hour)) {
+	// Minute-boundary apps commonly render during the final second of a minute.
+	// Reject stale markers, but preserve even a sub-second future boundary so
+	// the HTTP dwell can be shortened and the display polls on time.
+	if err != nil || !parsed.After(now) || parsed.After(now.Add(24*time.Hour)) {
 		return nil
 	}
 	return &parsed

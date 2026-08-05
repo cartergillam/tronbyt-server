@@ -45,6 +45,23 @@ func TestNormalizeSchemaBytes(t *testing.T) {
 	assert.True(t, schema.Fields[3].Secret)
 }
 
+func TestConfigurationSchemaJSONContractOmitsEmptyOptions(t *testing.T) {
+	schema := normalizedSchema{Version: "1", Fields: []normalizedSchemaField{{
+		Key: "show_team_colored_logo_background", Title: "Team-colour background",
+		Type: "boolean", Default: true,
+	}}}
+	payload, err := json.Marshal(schema)
+	require.NoError(t, err)
+	var decoded struct {
+		Fields []map[string]any `json:"fields"`
+	}
+	require.NoError(t, json.Unmarshal(payload, &decoded))
+	require.Len(t, decoded.Fields, 1)
+	assert.Equal(t, "boolean", decoded.Fields[0]["type"])
+	assert.Equal(t, true, decoded.Fields[0]["default"])
+	assert.NotContains(t, decoded.Fields[0], "options", "clients must tolerate omitted options for non-enum controls")
+}
+
 func TestValidateConfigPatchAndSecretSanitization(t *testing.T) {
 	minimum, maximum := 0.0, 10.0
 	schema := normalizedSchema{Version: "1", Fields: []normalizedSchemaField{
@@ -249,7 +266,7 @@ func TestInstalledAppsExcludeTemporaryPushedContent(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 }
 
-func TestDisplayPowerOnRestoresClockAndNeverPushedContent(t *testing.T) {
+func TestLegacyBrightnessPowerOnRestoresNormalRotationAndNeverPushedContent(t *testing.T) {
 	s := newTestServerAPI(t)
 	ctx := context.Background()
 	clockPath := "system-apps/apps/clock/clock.star"
@@ -276,7 +293,7 @@ func TestDisplayPowerOnRestoresClockAndNeverPushedContent(t *testing.T) {
 	device, err := gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").First(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, device.DisplayRestoreApp)
-	assert.Equal(t, "clock-main", *device.DisplayRestoreApp)
+	assert.Equal(t, "weather", *device.DisplayRestoreApp)
 	assert.Nil(t, device.DisplayingApp)
 
 	req = newAPIRequest(http.MethodPatch, "/v0/devices/testdevice", "device_api_key", []byte(`{"brightness":70}`))
@@ -286,7 +303,7 @@ func TestDisplayPowerOnRestoresClockAndNeverPushedContent(t *testing.T) {
 	device, err = gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").First(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, device.DisplayingApp)
-	assert.Equal(t, "clock-main", *device.DisplayingApp)
+	assert.Equal(t, "weather", *device.DisplayingApp)
 	assert.NotEqual(t, "999", *device.DisplayingApp)
 }
 

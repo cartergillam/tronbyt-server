@@ -93,9 +93,46 @@ func GetRepoInfo(path string, remoteURL string) (*RepoInfo, error) {
 	}, nil
 }
 
-// EnsureRepo clones a repo if it doesn't exist, or pulls if it does and update is true.
+// EnsureRepo clones a repository using its default branch, preserving the
+// historical behavior for user-managed custom repositories.
 func EnsureRepo(path string, repoURL string, token string, update bool) error {
-	slog.Info("Checking git repo", "path", path, "url", repoURL)
+	return ensureRepo(path, repoURL, "", token, update)
+}
+
+// EnsureRepoAtRef makes the system-apps checkout deterministic. The ref is a
+// branch name and expectedCommit may be either a full SHA or an unambiguous
+// prefix. The returned info is suitable for sanitized startup diagnostics.
+func EnsureRepoAtRef(path, repoURL, ref, expectedCommit, token string, update bool) (*RepoInfo, error) {
+	if err := ensureRepo(path, repoURL, strings.TrimSpace(ref), token, update); err != nil {
+		return nil, err
+	}
+	info, err := GetRepoInfo(path, repoURL)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyResolvedRepo(info, ref, expectedCommit); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+func verifyResolvedRepo(info *RepoInfo, ref, expectedCommit string) error {
+	if info == nil {
+		return errors.New("resolved apps repository info is missing")
+	}
+	if ref != "" && info.Branch != ref {
+		return fmt.Errorf("resolved apps ref %q, expected %q", info.Branch, ref)
+	}
+	expectedCommit = strings.ToLower(strings.TrimSpace(expectedCommit))
+	if expectedCommit != "" && !strings.HasPrefix(strings.ToLower(info.CommitHash), expectedCommit) {
+		return fmt.Errorf("resolved apps commit %s, expected %s", info.CommitHash, expectedCommit)
+	}
+	return nil
+}
+
+// ensureRepo clones a repo if it doesn't exist, or pulls if it does and update is true.
+func ensureRepo(path string, repoURL string, ref string, token string, update bool) error {
+	slog.Info("Checking git repo", "path", path, "url", repoURL, "ref", ref)
 
 	var clientOpts []client.Option
 
@@ -114,14 +151,18 @@ func EnsureRepo(path string, repoURL string, token string, update bool) error {
 	// Check if path exists
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		slog.Info("Cloning repo", "url", repoURL)
-		r, err := git.PlainClone(path, &git.CloneOptions{
+		cloneOptions := &git.CloneOptions{
 			URL:           repoURL,
 			Progress:      &logWriter{},
 			Depth:         1,
 			SingleBranch:  true,
 			Tags:          git.NoTags,
 			ClientOptions: clientOpts,
-		})
+		}
+		if ref != "" {
+			cloneOptions.ReferenceName = plumbing.NewBranchReferenceName(ref)
+		}
+		r, err := git.PlainClone(path, cloneOptions)
 		if err == nil {
 			_ = r.Close()
 		}
@@ -137,7 +178,7 @@ func EnsureRepo(path string, repoURL string, token string, update bool) error {
 			if err := os.RemoveAll(path); err != nil {
 				return fmt.Errorf("failed to remove invalid repo directory: %w", err)
 			}
-			return EnsureRepo(path, repoURL, token, update)
+			return ensureRepo(path, repoURL, ref, token, update)
 		}
 		// If not a git repo, maybe remove and re-clone?
 		// For safety, error out.
@@ -162,7 +203,23 @@ func EnsureRepo(path string, repoURL string, token string, update bool) error {
 			return fmt.Errorf("failed to remove old repo: %w", err)
 		}
 
-		return EnsureRepo(path, repoURL, token, update)
+		return ensureRepo(path, repoURL, ref, token, update)
+	}
+
+	if ref != "" {
+		headRef, err := r.Head()
+		if err != nil || !headRef.Name().IsBranch() || headRef.Name().Short() != ref {
+			actual := "detached"
+			if err == nil && headRef.Name().IsBranch() {
+				actual = headRef.Name().Short()
+			}
+			slog.Warn("Repo ref mismatch, re-cloning", "actual", actual, "expected", ref)
+			_ = r.Close()
+			if err := os.RemoveAll(path); err != nil {
+				return fmt.Errorf("failed to remove checkout with wrong ref: %w", err)
+			}
+			return ensureRepo(path, repoURL, ref, token, update)
+		}
 	}
 
 	if !update {
@@ -212,7 +269,7 @@ func EnsureRepo(path string, repoURL string, token string, update bool) error {
 			if err := os.RemoveAll(path); err != nil {
 				return fmt.Errorf("failed to remove broken repo: %w", err)
 			}
-			return EnsureRepo(path, repoURL, token, update)
+			return ensureRepo(path, repoURL, ref, token, update)
 		}
 		return fmt.Errorf("failed to fetch repo: %w", err)
 	}
@@ -227,7 +284,7 @@ func EnsureRepo(path string, repoURL string, token string, update bool) error {
 		if err := os.RemoveAll(path); err != nil {
 			return fmt.Errorf("failed to remove broken repo: %w", err)
 		}
-		return EnsureRepo(path, repoURL, token, update)
+		return ensureRepo(path, repoURL, ref, token, update)
 	}
 
 	// Hard Reset the worktree to the remote commit

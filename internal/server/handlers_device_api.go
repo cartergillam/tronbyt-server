@@ -171,11 +171,13 @@ func (s *Server) handleNextApp(w http.ResponseWriter, r *http.Request) {
 	brightness := device.GetEffectiveBrightness()
 	w.Header().Set("Tronbyt-Brightness", fmt.Sprintf("%d", brightness))
 
-	dwell := device.GetEffectiveDwellTime(app)
+	dwell := effectiveFrameDwell(now, device.GetEffectiveDwellTime(app), app)
 	w.Header().Set("Tronbyt-Dwell-Secs", fmt.Sprintf("%d", dwell))
 	if app != nil {
 		w.Header().Set("Tronbyt-App", app.Name)
 		w.Header().Set("Tronbyt-Installation", app.Iname)
+	} else if trace.InstallationID != "" {
+		w.Header().Set("Tronbyt-Installation", trace.InstallationID)
 	}
 
 	if _, err := w.Write(imgData); err != nil {
@@ -187,8 +189,13 @@ func (s *Server) handleNextApp(w http.ResponseWriter, r *http.Request) {
 	if app != nil {
 		appID, iname = app.Name, app.Iname
 		renderResult, renderMessage = app.LastRenderResult, app.LastRenderMessage
+	} else if trace.InstallationID != "" {
+		iname = trace.InstallationID
 	}
-	s.pollDiagnostics.Store(device.ID, pollDiagnostic{LastSuccess: now.UTC(), LatencyMS: time.Since(started).Milliseconds()})
+	s.pollDiagnostics.Store(device.ID, pollDiagnostic{
+		LastSuccess: now.UTC(), LatencyMS: time.Since(started).Milliseconds(),
+		FrameHash: hex.EncodeToString(hash[:6]), App: iname,
+	})
 	s.diagnosticsEvents.add(device.ID, "device_poll", "HTTP frame delivered: "+trace.Reason, iname)
 	slog.Info("HTTP frame request",
 		"request_id", requestID,
@@ -215,4 +222,16 @@ func (s *Server) handleNextApp(w http.ResponseWriter, r *http.Request) {
 		"last_seen", now.UTC().Format(time.RFC3339),
 		"duration_ms", time.Since(started).Milliseconds(),
 	)
+}
+
+func effectiveFrameDwell(now time.Time, configured int, app *data.App) int {
+	configured = max(configured, 1)
+	if app == nil || app.NextRenderAt == nil || !app.NextRenderAt.After(now) {
+		return configured
+	}
+	untilBoundary := int(app.NextRenderAt.Sub(now).Round(time.Second) / time.Second)
+	if untilBoundary < 1 {
+		untilBoundary = 1
+	}
+	return min(configured, untilBoundary)
 }

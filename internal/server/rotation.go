@@ -21,6 +21,7 @@ import (
 type frameSelectionTrace struct {
 	Reason         string
 	Classification string
+	InstallationID string
 	WebPPath       string
 	CacheDecision  string
 }
@@ -37,6 +38,15 @@ func selectionTrace(ctx context.Context) *frameSelectionTrace {
 }
 
 func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user *data.User) ([]byte, *data.App, error) {
+	if device.Sleeping {
+		if trace := selectionTrace(ctx); trace != nil {
+			trace.Reason = "sleeping"
+			trace.Classification = "sleep"
+			trace.CacheDecision = "rotation_preserved"
+		}
+		data, err := web.Assets.ReadFile("static/images/default.webp")
+		return data, nil, err
+	}
 	// 1. Check Pushed Ephemeral Images (__*)
 	// Serve the oldest and delete only that one. Anonymous pushes accumulate
 	// unbounded; callers should use coalesceID to limit queue depth.
@@ -65,10 +75,21 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 					if trace := selectionTrace(ctx); trace != nil {
 						trace.Reason = "temporary_push"
 						trace.Classification = "temporary_push"
+						trace.InstallationID = optionalString(device.ActiveShowNowApp)
 						trace.WebPPath = entryPath
 						trace.CacheDecision = "one_shot_file"
 					}
-					s.diagnosticsEvents.add(device.ID, "temporary_push_displayed", "Temporary frame displayed", "")
+					activeID := optionalString(device.ActiveShowNowApp)
+					updates := data.Device{DisplayingApp: device.ActiveShowNowApp, DisplayRestoreApp: device.ShowNowRestoreApp, ShowNowRestoreApp: nil}
+					if _, updateErr := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).
+						Select("DisplayingApp", "DisplayRestoreApp", "ShowNowRestoreApp").Updates(ctx, updates); updateErr != nil {
+						slog.Warn("Failed to record temporary display transition", "device", device.ID, "error", updateErr)
+					} else {
+						device.DisplayingApp = device.ActiveShowNowApp
+						device.DisplayRestoreApp = device.ShowNowRestoreApp
+						device.ShowNowRestoreApp = nil
+					}
+					s.diagnosticsEvents.add(device.ID, "temporary_push_displayed", "Temporary frame displayed", activeID)
 					return imgData, nil, nil
 				}
 				// If reading failed, clean it up and try the next one
@@ -259,10 +280,13 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 	// normal night-mode, pin, and rotation rules resume.
 	if device.DisplayRestoreApp != nil && *device.DisplayRestoreApp != "" {
 		restoreID := *device.DisplayRestoreApp
-		if _, err := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).Update(ctx, "display_restore_app", nil); err != nil {
+		if _, err := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).
+			Select("DisplayRestoreApp", "ActiveShowNowApp").
+			Updates(ctx, data.Device{DisplayRestoreApp: nil, ActiveShowNowApp: nil}); err != nil {
 			return nil, 0, fmt.Errorf("clear display restore target: %w", err)
 		}
 		device.DisplayRestoreApp = nil
+		device.ActiveShowNowApp = nil
 		for i := range device.Apps {
 			app := device.Apps[i]
 			if app.Iname == restoreID && !app.Pushed && app.Enabled &&

@@ -394,25 +394,7 @@ func (s *Server) getRealIP(r *http.Request) string {
 		remoteIP = r.RemoteAddr
 	}
 
-	trustedProxies := s.Config.TrustedProxies
-	if trustedProxies == "" {
-		return remoteIP
-	}
-
-	isTrusted := false
-	if trustedProxies == "*" {
-		isTrusted = true
-	} else {
-		// Simple check for comma-separated list of IPs
-		for proxy := range strings.SplitSeq(trustedProxies, ",") {
-			if strings.TrimSpace(proxy) == remoteIP {
-				isTrusted = true
-				break
-			}
-		}
-	}
-
-	if isTrusted {
+	if s.isTrustedProxy(remoteIP) {
 		xfwd := r.Header.Get("X-Forwarded-For")
 		if xfwd != "" {
 			parts := strings.Split(xfwd, ",")
@@ -421,6 +403,30 @@ func (s *Server) getRealIP(r *http.Request) string {
 	}
 
 	return remoteIP
+}
+
+func (s *Server) isTrustedProxy(remoteIP string) bool {
+	configured := strings.TrimSpace(s.Config.TrustedProxies)
+	if configured == "" {
+		return false
+	}
+	if configured == "*" {
+		return true
+	}
+	ip := net.ParseIP(remoteIP)
+	if ip == nil {
+		return false
+	}
+	for entry := range strings.SplitSeq(configured, ",") {
+		entry = strings.TrimSpace(entry)
+		if candidate := net.ParseIP(entry); candidate != nil && candidate.Equal(ip) {
+			return true
+		}
+		if _, network, err := net.ParseCIDR(entry); err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) isTrustedNetwork(r *http.Request) bool {
@@ -572,22 +578,10 @@ func (s *Server) notifyDashboard(username string, event WSEvent) {
 
 func (s *Server) GetBaseURL(r *http.Request) string {
 	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+	if r.TLS != nil || r.URL.Scheme == "https" {
 		scheme = "https"
 	}
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
-	}
-
-	if port := r.Header.Get("X-Forwarded-Port"); port != "" {
-		if h, _, err := net.SplitHostPort(host); err == nil {
-			host = h
-		}
-		host = net.JoinHostPort(host, port)
-	}
-
-	return fmt.Sprintf("%s://%s", scheme, host)
+	return fmt.Sprintf("%s://%s", scheme, r.Host)
 }
 
 func (s *Server) getImageURL(r *http.Request, deviceID string) string {

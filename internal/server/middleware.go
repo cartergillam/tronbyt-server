@@ -324,14 +324,30 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func ProxyMiddleware(next http.Handler) http.Handler {
+func (s *Server) ProxyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if remoteIP == "" {
+			remoteIP = r.RemoteAddr
+		}
+		if !s.isTrustedProxy(remoteIP) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); proto == "http" || proto == "https" {
 			r.URL.Scheme = proto
 		}
-		if host := r.Header.Get("X-Forwarded-Host"); host != "" {
+		if host := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Host"), ",")[0]); host != "" {
 			r.Host = host
 			r.URL.Host = host
+		}
+		if port := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Port"), ",")[0]); port != "" {
+			host := r.Host
+			if value, _, err := net.SplitHostPort(host); err == nil {
+				host = value
+			}
+			r.Host = net.JoinHostPort(host, port)
+			r.URL.Host = r.Host
 		}
 		next.ServeHTTP(w, r)
 	})

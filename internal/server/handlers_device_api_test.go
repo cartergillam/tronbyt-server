@@ -1,13 +1,55 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sort"
 	"testing"
 
 	"tronbyt-server/internal/data"
+
+	"gorm.io/gorm"
 )
+
+func TestBrightnessHeaderChangesWithoutFrameTransition(t *testing.T) {
+	s := newTestServerAPI(t)
+	ctx := context.Background()
+	path := "pushed:brightness"
+	app := data.App{DeviceID: "testdevice", Iname: "brightness", Name: "Static", Enabled: true, Pushed: true, PushKind: persistentPushKind, Path: &path}
+	if err := s.DB.Create(&app).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.savePushedImage("testdevice", "brightness", "", []byte("same-frame")); err != nil {
+		t.Fatal(err)
+	}
+
+	poll := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/testdevice/next", nil)
+		req.SetPathValue("id", "testdevice")
+		rr := httptest.NewRecorder()
+		s.handleNextApp(rr, req)
+		return rr
+	}
+
+	_, err := gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").Update(ctx, "brightness", data.Brightness(20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := poll()
+	_, err = gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").Update(ctx, "brightness", data.Brightness(80))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := poll()
+
+	if first.Header().Get("Tronbyt-Brightness") != "20" || second.Header().Get("Tronbyt-Brightness") != "80" {
+		t.Fatalf("brightness headers did not update immediately: first=%q second=%q", first.Header().Get("Tronbyt-Brightness"), second.Header().Get("Tronbyt-Brightness"))
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatal("brightness-only update unexpectedly changed the frame")
+	}
+}
 
 func TestConcurrentHTTPPollsConsumeDistinctOneShotFrames(t *testing.T) {
 	s := newTestServerAPI(t)

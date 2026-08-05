@@ -611,6 +611,12 @@ type Device struct {
 	LastAppIndex        int        `json:"last_app_index"`
 	DisplayingApp       *string    `json:"displaying_app"`
 	DisplayRestoreApp   *string    `json:"display_restore_app,omitempty"`
+	Sleeping            bool       `json:"sleeping"`
+	ActiveShowNowApp    *string    `json:"active_show_now_app,omitempty"`
+	ShowNowRestoreApp   *string    `json:"show_now_restore_app,omitempty"`
+	StateVersion        uint64     `json:"state_version"`
+	LastMutationID      string     `json:"last_mutation_id,omitempty"`
+	LastMutationResult  string     `json:"last_mutation_result,omitempty"`
 	PinnedApp           *string    `json:"pinned_app"`
 	InterstitialEnabled bool       `json:"interstitial_enabled"`
 	InterstitialApp     *string    `json:"interstitial_app"`
@@ -948,6 +954,9 @@ func (d *Device) GetEffectiveDwellTime(app *App) int {
 
 // GetEffectiveBrightness calculates the effective brightness of a device, accounting for night and dim modes.
 func (d *Device) GetEffectiveBrightness() int {
+	if d.Sleeping {
+		return 0
+	}
 	brightness := int(d.Brightness)
 	if d.GetNightModeIsActive() {
 		brightness = int(d.NightBrightness)

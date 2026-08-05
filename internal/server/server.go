@@ -17,10 +17,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"tronbyt-server/internal/apps"
 	"tronbyt-server/internal/config"
+	"tronbyt-server/internal/gitutils"
 	syncer "tronbyt-server/internal/sync"
 	"tronbyt-server/web"
 
@@ -55,6 +57,7 @@ type Server struct {
 	devicePollLocks      sync.Map
 	diagnosticsEvents    *deviceEventTimeline
 	pollDiagnostics      sync.Map
+	systemAppsInfo       atomic.Pointer[gitutils.RepoInfo]
 
 	// SchemaCache, when set, allows forcing a one-shot refetch of an app's
 	// cached HTTP responses so dynamic schema data (e.g. dropdown options
@@ -137,7 +140,7 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 
 	// System Repo
 	repo, err := s.getSetting("system_apps_repo")
-	if err == nil && repo != "" {
+	if !cfg.SystemAppsRepoExplicit() && err == nil && repo != "" {
 		cfg.SystemAppsRepo = repo
 	}
 
@@ -237,6 +240,11 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 
 	s.registerMetrics()
 	s.RefreshSystemAppsCache()
+	if info, err := gitutils.GetRepoInfo(cfg.SystemAppsDir(), cfg.SystemAppsRepo); err == nil {
+		s.systemAppsInfo.Store(info)
+	} else {
+		slog.Warn("System apps checkout metadata unavailable", "repository", cfg.SystemAppsRepo, "ref", cfg.SystemAppsRef, "error", err)
+	}
 	if err := s.cleanupTemporaryPushLifecycle(context.Background()); err != nil {
 		slog.Warn("Failed to clean temporary push lifecycle", "error", err)
 	}
@@ -390,7 +398,7 @@ func (s *Server) routes() {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Chain middlewares: Recover -> Metrics -> Gzip -> Logging -> Proxy -> Mux
-	RecoverMiddleware(s.metricsMiddleware(GzipMiddleware(LoggingMiddleware(ProxyMiddleware(s.Router))))).ServeHTTP(w, r)
+	RecoverMiddleware(s.metricsMiddleware(GzipMiddleware(LoggingMiddleware(s.ProxyMiddleware(s.Router))))).ServeHTTP(w, r)
 }
 
 func (s *Server) GetTmpDir() string {

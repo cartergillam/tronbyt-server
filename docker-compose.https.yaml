@@ -10,6 +10,8 @@ services:
       - PUID=${UID:-1000}
       - PGID=${GID:-${UID:-1000}}
       - SYSTEM_APPS_REPO
+      - SYSTEM_APPS_REF
+      - SYSTEM_APPS_EXPECTED_COMMIT
       - PRODUCTION
       - ENABLE_USER_REGISTRATION
       - GITHUB_TOKEN

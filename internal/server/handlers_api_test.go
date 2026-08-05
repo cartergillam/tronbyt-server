@@ -341,6 +341,7 @@ func TestHandlePushAppDefaultsToOneShot(t *testing.T) {
 	s := newTestServerAPI(t)
 	deviceID := "testdevice"
 	appID := setupColorApp(t, s)
+	seedShowNowRestoreTarget(t, s, deviceID)
 
 	body, _ := json.Marshal(PushAppData{
 		AppID:          appID,
@@ -361,6 +362,33 @@ func TestHandlePushAppDefaultsToOneShot(t *testing.T) {
 	require.Len(t, entries, 1)
 	assert.Contains(t, entries[0].Name(), "show-now-one-shot")
 	assert.True(t, strings.HasPrefix(entries[0].Name(), "__"), "one-shot pushes must use consumable files")
+}
+
+func TestHandlePushAppRequiresRestoreTarget(t *testing.T) {
+	s := newTestServerAPI(t)
+	appID := setupColorApp(t, s)
+	body, _ := json.Marshal(PushAppData{AppID: appID, Config: map[string]any{"color": "#ff0000"}})
+	req := newAPIRequest("POST", "/v0/devices/testdevice/push_app", "device_api_key", body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"code":"no_restore_target"`)
+}
+
+func TestHandlePushAppRejectsStaleState(t *testing.T) {
+	s := newTestServerAPI(t)
+	appID := setupColorApp(t, s)
+	seedShowNowRestoreTarget(t, s, "testdevice")
+	stale := uint64(99)
+	body, _ := json.Marshal(PushAppData{
+		AppID: appID, Config: map[string]any{"color": "#ff0000"},
+		ExpectedStateVersion: &stale, MutationID: "stale-show-now",
+	})
+	req := newAPIRequest("POST", "/v0/devices/testdevice/push_app", "device_api_key", body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"code":"stale_state"`)
 }
 
 func TestHandlePushAppUpdatesExistingInstallation(t *testing.T) {
@@ -513,6 +541,17 @@ def main(config):
 	return appID
 }
 
+func seedShowNowRestoreTarget(t *testing.T, s *Server, deviceID string) {
+	t.Helper()
+	require.NoError(t, gorm.G[data.App](s.DB).Create(context.Background(), &data.App{
+		DeviceID: deviceID,
+		Iname:    "normal-rotation-app",
+		Name:     "Normal Rotation App",
+		Enabled:  true,
+		Order:    0,
+	}))
+}
+
 // TestHandlePushAppConfigReplacesCache verifies that providing a config always
 // triggers a fresh render, replacing the cached image rather than serving it.
 func TestHandlePushAppConfigReplacesCache(t *testing.T) {
@@ -566,6 +605,7 @@ func TestHandlePushAppAppIDOnly(t *testing.T) {
 	apiKey := "device_api_key"
 	deviceID := "testdevice"
 	appID := setupColorApp(t, s)
+	seedShowNowRestoreTarget(t, s, deviceID)
 
 	body, _ := json.Marshal(PushAppData{
 		AppID:  appID,
@@ -775,6 +815,55 @@ func TestHandlePatchDevice(t *testing.T) {
 	req = newAPIRequest("PATCH", fmt.Sprintf("/v0/devices/%s", deviceID), apiKey, body)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
+}
+
+func TestHandlePatchDeviceSleepWakePreservesRotationAndBrightness(t *testing.T) {
+	s := newTestServerAPI(t)
+	ctx := context.Background()
+	device, err := gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").First(ctx)
+	require.NoError(t, err)
+	device.Brightness = 73
+	clock := data.App{DeviceID: device.ID, Iname: "clock", Name: "ogclock", Enabled: true, Order: 0}
+	weather := data.App{DeviceID: device.ID, Iname: "weather", Name: "weather", Enabled: true, Order: 1}
+	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &clock))
+	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &weather))
+	device.DisplayingApp = &clock.Iname
+	require.NoError(t, s.DB.Omit("Apps").Save(&device).Error)
+
+	sleep := true
+	body, _ := json.Marshal(DeviceUpdate{Sleeping: &sleep, ExpectedStateVersion: &device.StateVersion, MutationID: "sleep-test"})
+	req := newAPIRequest("PATCH", "/v0/devices/testdevice", "device_api_key", body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var sleepingPayload DevicePayload
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&sleepingPayload))
+	assert.True(t, sleepingPayload.Sleeping)
+	assert.Equal(t, 0, sleepingPayload.EffectiveBrightness)
+	assert.Equal(t, 73, sleepingPayload.Brightness)
+
+	device, err = gorm.G[data.Device](s.DB).Preload("Apps", orderedAppsPreload).Where("id = ?", device.ID).First(ctx)
+	require.NoError(t, err)
+	assert.True(t, device.Sleeping)
+	assert.Len(t, device.Apps, 2)
+	assert.True(t, device.Apps[0].Enabled)
+	assert.Equal(t, "clock", optionalString(device.DisplayRestoreApp))
+
+	wake := false
+	body, _ = json.Marshal(DeviceUpdate{Sleeping: &wake, ExpectedStateVersion: &device.StateVersion, MutationID: "wake-test"})
+	req = newAPIRequest("PATCH", "/v0/devices/testdevice", "device_api_key", body)
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var wakePayload DevicePayload
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&wakePayload))
+	assert.False(t, wakePayload.Sleeping)
+	assert.Equal(t, 73, wakePayload.EffectiveBrightness)
+
+	device, err = gorm.G[data.Device](s.DB).Where("id = ?", device.ID).First(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "clock", optionalString(device.DisplayingApp))
+	assert.Equal(t, "clock", optionalString(device.DisplayRestoreApp))
 }
 
 func TestValidateDeviceLocation(t *testing.T) {
@@ -1059,7 +1148,7 @@ func TestHandlePatchInstallationSchedule(t *testing.T) {
 	}
 
 	// Verify the response JSON also contains the schedule fields
-	var respApp data.App
+	var respApp AppPayload
 	if err := json.NewDecoder(rr.Body).Decode(&respApp); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}

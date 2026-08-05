@@ -3,9 +3,7 @@ package server
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 
 	"tronbyt-server/internal/data"
 
@@ -13,6 +11,11 @@ import (
 )
 
 func displayRestoreTarget(device *data.Device) *data.App {
+	if device.DisplayingApp != nil {
+		if current := device.GetApp(*device.DisplayingApp); current != nil && current.Enabled && !current.Pushed {
+			return current
+		}
+	}
 	apps := make([]*data.App, 0, len(device.Apps))
 	for _, app := range device.Apps {
 		if app.Enabled && !app.Pushed {
@@ -20,18 +23,45 @@ func displayRestoreTarget(device *data.Device) *data.App {
 		}
 	}
 	sort.SliceStable(apps, func(i, j int) bool { return apps[i].Order < apps[j].Order })
-	for _, app := range apps {
-		name := strings.TrimSpace(strings.ToLower(app.Name))
-		pathName := ""
-		if app.Path != nil {
-			pathName = strings.TrimSuffix(strings.ToLower(filepath.Base(*app.Path)), filepath.Ext(*app.Path))
+	if len(apps) > 0 {
+		start := device.LastAppIndex
+		if start < 0 || start >= len(apps) {
+			start = 0
 		}
-		if name == "clock" || pathName == "clock" {
-			return app
+		return apps[start]
+	}
+	return nil
+}
+
+func (s *Server) applySleepState(ctx context.Context, device *data.Device, sleeping bool) error {
+	_, err := s.clearTemporaryPushFiles(device.ID)
+	if err != nil {
+		return err
+	}
+	var target *data.App
+	if device.DisplayRestoreApp != nil {
+		candidate := device.GetApp(*device.DisplayRestoreApp)
+		if candidate != nil && candidate.Enabled && !candidate.Pushed {
+			target = candidate
 		}
 	}
-	if len(apps) > 0 {
-		return apps[0]
+	if target == nil {
+		target = displayRestoreTarget(device)
+	}
+	var restoreID *string
+	if target != nil {
+		value := target.Iname
+		restoreID = &value
+	}
+	device.Sleeping = sleeping
+	device.DisplayingApp = nil
+	device.DisplayRestoreApp = restoreID
+	device.ActiveShowNowApp = nil
+	device.ShowNowRestoreApp = nil
+	if sleeping {
+		s.diagnosticsEvents.add(device.ID, "display_sleep", "Display entered sleep without changing rotation", "")
+	} else {
+		s.diagnosticsEvents.add(device.ID, "display_wake", "Display wake scheduled normal rotation restore", optionalString(restoreID))
 	}
 	return nil
 }

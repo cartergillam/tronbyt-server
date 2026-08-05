@@ -24,40 +24,46 @@ import (
 
 // DeviceUpdate represents the updatable fields for a device via API.
 type DeviceUpdate struct {
-	Brightness          *int                 `json:"brightness"`
-	IntervalSec         *int                 `json:"intervalSec"`
-	NightModeEnabled    *bool                `json:"nightModeEnabled"`
-	NightModeActive     *bool                `json:"nightModeActive"`
-	NightModeApp        *string              `json:"nightModeApp"`
-	NightModeBrightness *int                 `json:"nightModeBrightness"`
-	NightModeStartTime  *string              `json:"nightModeStartTime"`
-	NightModeEndTime    *string              `json:"nightModeEndTime"`
-	DimModeActive       *bool                `json:"dimModeActive"`
-	DimModeEnabled      *bool                `json:"dimModeEnabled"`
-	DimModeStartTime    *string              `json:"dimModeStartTime"`
-	DimModeBrightness   *int                 `json:"dimModeBrightness"`
-	PinnedApp           *string              `json:"pinnedApp"`
-	AutoDim             *bool                `json:"autoDim"` // Legacy
-	Location            *data.DeviceLocation `json:"location"`
+	Brightness           *int                 `json:"brightness"`
+	IntervalSec          *int                 `json:"intervalSec"`
+	NightModeEnabled     *bool                `json:"nightModeEnabled"`
+	NightModeActive      *bool                `json:"nightModeActive"`
+	NightModeApp         *string              `json:"nightModeApp"`
+	NightModeBrightness  *int                 `json:"nightModeBrightness"`
+	NightModeStartTime   *string              `json:"nightModeStartTime"`
+	NightModeEndTime     *string              `json:"nightModeEndTime"`
+	DimModeActive        *bool                `json:"dimModeActive"`
+	DimModeEnabled       *bool                `json:"dimModeEnabled"`
+	DimModeStartTime     *string              `json:"dimModeStartTime"`
+	DimModeBrightness    *int                 `json:"dimModeBrightness"`
+	PinnedApp            *string              `json:"pinnedApp"`
+	AutoDim              *bool                `json:"autoDim"` // Legacy
+	Location             *data.DeviceLocation `json:"location"`
+	Sleeping             *bool                `json:"sleeping"`
+	ExpectedStateVersion *uint64              `json:"expectedStateVersion"`
+	MutationID           string               `json:"mutationID"`
 }
 
 // DevicePayload represents the full device data returned via API.
 type DevicePayload struct {
-	ID           string              `json:"id"`
-	Type         data.DeviceType     `json:"type"`
-	DisplayName  string              `json:"displayName"`
-	Notes        string              `json:"notes"`
-	IntervalSec  int                 `json:"intervalSec"`
-	Brightness   int                 `json:"brightness"`
-	NightMode    NightMode           `json:"nightMode"`
-	DimMode      DimMode             `json:"dimMode"`
-	PinnedApp    *string             `json:"pinnedApp"`
-	Interstitial Interstitial        `json:"interstitial"`
-	LastSeen     *string             `json:"lastSeen"`
-	Info         DeviceInfo          `json:"info"`
-	AutoDim      bool                `json:"autoDim"`
-	Location     data.DeviceLocation `json:"location"`
-	Timezone     string              `json:"timezone"`
+	ID                  string              `json:"id"`
+	Type                data.DeviceType     `json:"type"`
+	DisplayName         string              `json:"displayName"`
+	Notes               string              `json:"notes"`
+	IntervalSec         int                 `json:"intervalSec"`
+	Brightness          int                 `json:"brightness"`
+	NightMode           NightMode           `json:"nightMode"`
+	DimMode             DimMode             `json:"dimMode"`
+	PinnedApp           *string             `json:"pinnedApp"`
+	Interstitial        Interstitial        `json:"interstitial"`
+	LastSeen            *string             `json:"lastSeen"`
+	Info                DeviceInfo          `json:"info"`
+	AutoDim             bool                `json:"autoDim"`
+	Location            data.DeviceLocation `json:"location"`
+	Timezone            string              `json:"timezone"`
+	Sleeping            bool                `json:"sleeping"`
+	EffectiveBrightness int                 `json:"effectiveBrightness"`
+	StateVersion        uint64              `json:"stateVersion"`
 }
 
 // NightMode represents night mode settings in the API payload.
@@ -179,11 +185,14 @@ func (s *Server) toDevicePayload(d *data.Device) DevicePayload {
 			Enabled: d.InterstitialEnabled,
 			App:     d.InterstitialApp,
 		},
-		LastSeen: lastSeen,
-		Info:     info,
-		AutoDim:  d.NightModeEnabled,
-		Location: d.Location,
-		Timezone: d.GetTimezone(),
+		LastSeen:            lastSeen,
+		Info:                info,
+		AutoDim:             d.NightModeEnabled,
+		Location:            d.Location,
+		Timezone:            d.GetTimezone(),
+		Sleeping:            d.Sleeping,
+		EffectiveBrightness: int(d.GetEffectiveBrightness()),
+		StateVersion:        d.StateVersion,
 	}
 }
 
@@ -242,6 +251,7 @@ type AppPayload struct {
 	ConsecutiveHidden   int    `json:"consecutiveHiddenCount"`
 	LastVisibleRenderAt *int64 `json:"lastVisibleSuccessfulRenderAt,omitempty"`
 	LocationSource      string `json:"locationSource,omitempty"`
+	StateVersion        uint64 `json:"stateVersion"`
 
 	// Schedule fields
 	StartTime *string  `json:"startTime"`
@@ -291,6 +301,7 @@ func (s *Server) toAppPayload(device *data.Device, app *data.App) AppPayload {
 		ConsecutiveHidden:   app.ConsecutiveHidden,
 		LastVisibleRenderAt: lastVisibleRenderAt,
 		LocationSource:      appLocationSource(app, device),
+		StateVersion:        device.StateVersion,
 
 		StartTime: app.StartTime,
 		EndTime:   app.EndTime,
@@ -312,13 +323,15 @@ type ListDevicesPayload struct {
 
 // PushAppData represents the data for pushing an app configuration.
 type PushAppData struct {
-	Config            map[string]any `json:"config"`
-	AppID             string         `json:"app_id"`
-	InstallationID    string         `json:"installationID"`
-	InstallationIDAlt string         `json:"installationId"`
-	CoalesceID        string         `json:"coalesceID"`
-	Background        bool           `json:"background"`
-	Persistent        bool           `json:"persistent"`
+	Config               map[string]any `json:"config"`
+	AppID                string         `json:"app_id"`
+	InstallationID       string         `json:"installationID"`
+	InstallationIDAlt    string         `json:"installationId"`
+	CoalesceID           string         `json:"coalesceID"`
+	Background           bool           `json:"background"`
+	Persistent           bool           `json:"persistent"`
+	ExpectedStateVersion *uint64        `json:"expectedStateVersion"`
+	MutationID           string         `json:"mutationID"`
 }
 
 func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
@@ -345,8 +358,7 @@ func (s *Server) handlePushApp(w http.ResponseWriter, r *http.Request) {
 	device := GetDevice(r)
 
 	var dataReq PushAppData
-	if err := json.NewDecoder(r.Body).Decode(&dataReq); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+	if !decodeAPIJSON(w, r, &dataReq) {
 		return
 	}
 
@@ -354,6 +366,32 @@ func (s *Server) handlePushApp(w http.ResponseWriter, r *http.Request) {
 	installationID := dataReq.InstallationID
 	if installationID == "" {
 		installationID = dataReq.InstallationIDAlt
+	}
+	if installationID == "" && dataReq.AppID == "" {
+		http.Error(w, "app_id is required when no valid installationID is provided", http.StatusBadRequest)
+		return
+	}
+	var showNowRestoreID *string
+	if !dataReq.Persistent {
+		unlock := s.lockDevicePoll(device.ID)
+		defer unlock()
+		fresh, err := gorm.G[data.Device](s.DB).Preload("Apps", orderedAppsPreload).Where("id = ?", device.ID).First(r.Context())
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "device_reload_failed", "Device state could not be refreshed", nil)
+			return
+		}
+		device = &fresh
+		if dataReq.ExpectedStateVersion != nil && *dataReq.ExpectedStateVersion != device.StateVersion {
+			writeAPIError(w, http.StatusConflict, "stale_state", "Device state changed before Show Now was applied", nil)
+			return
+		}
+		restore := displayRestoreTarget(device)
+		if restore == nil {
+			writeAPIError(w, http.StatusConflict, "no_restore_target", "Enable at least one normal app before using Show Now", nil)
+			return
+		}
+		value := restore.Iname
+		showNowRestoreID = &value
 	}
 
 	// Look up existing pushed app first (by path), then fall back to iname lookup.
@@ -484,7 +522,34 @@ func (s *Server) handlePushApp(w http.ResponseWriter, r *http.Request) {
 	if dataReq.Persistent {
 		s.diagnosticsEvents.add(device.ID, "persistent_push_created", "Persistent pushed frame created", installationID)
 	} else {
+		mutationID := strings.TrimSpace(dataReq.MutationID)
+		if mutationID == "" {
+			mutationID = newFrameRequestID()
+		}
+		if len(mutationID) > 64 {
+			mutationID = mutationID[:64]
+		}
+		updates := data.Device{
+			ActiveShowNowApp:   &installationID,
+			ShowNowRestoreApp:  showNowRestoreID,
+			LastMutationID:     mutationID,
+			LastMutationResult: "show_now_queued",
+			StateVersion:       device.StateVersion + 1,
+		}
+		if _, err := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).
+			Select("ActiveShowNowApp", "ShowNowRestoreApp", "LastMutationID", "LastMutationResult", "StateVersion").
+			Updates(r.Context(), updates); err != nil {
+			_, _ = s.clearTemporaryPushFiles(device.ID)
+			writeAPIError(w, http.StatusInternalServerError, "show_now_state_failed", "Show Now could not be queued safely", nil)
+			return
+		}
 		s.diagnosticsEvents.add(device.ID, "temporary_push_created", "Temporary Show Now frame created", installationID)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true, "mutationID": mutationID, "activeApp": installationID,
+			"restoreTarget": optionalString(showNowRestoreID), "stateVersion": updates.StateVersion,
+		})
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -748,10 +813,25 @@ func (s *Server) ensurePersistentPushedApp(ctx context.Context, deviceID, instal
 func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 	// Auth handled by middleware, get device
 	device := GetDevice(r)
+	unlock := s.lockDevicePoll(device.ID)
+	defer unlock()
+	fresh, err := gorm.G[data.Device](s.DB).Preload("Apps", orderedAppsPreload).Where("id = ?", device.ID).First(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "device_reload_failed", "Device state could not be refreshed", nil)
+		return
+	}
+	device = &fresh
 
 	var update DeviceUpdate
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+	if !decodeAPIJSON(w, r, &update) {
+		return
+	}
+	if update.ExpectedStateVersion != nil && *update.ExpectedStateVersion != device.StateVersion {
+		writeAPIError(w, http.StatusConflict, "stale_state", "Device state changed before this update was applied", nil)
+		return
+	}
+	if update.Brightness != nil && (*update.Brightness < 0 || *update.Brightness > 100) {
+		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_brightness", "Brightness must be between 0 and 100", nil)
 		return
 	}
 
@@ -773,6 +853,17 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	if update.Brightness != nil {
 		device.Brightness = data.Brightness(*update.Brightness)
+	}
+	if update.Sleeping != nil && *update.Sleeping != device.Sleeping {
+		if err := s.applySleepState(r.Context(), device, *update.Sleeping); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "sleep_transition_failed", "Display sleep state could not be changed", nil)
+			return
+		}
+	}
+	if update.Sleeping != nil && !*update.Sleeping {
+		if err := s.restoreDisplayAfterPowerOn(r.Context(), device); err != nil {
+			slog.Warn("Failed to restore normal rotation after wake", "device", device.ID, "error", err)
+		}
 	}
 	if update.IntervalSec != nil {
 		device.DefaultInterval = *update.IntervalSec
@@ -857,6 +948,15 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	device.StateVersion++
+	device.LastMutationID = strings.TrimSpace(update.MutationID)
+	if len(device.LastMutationID) > 64 {
+		device.LastMutationID = device.LastMutationID[:64]
+	}
+	if device.LastMutationID == "" {
+		device.LastMutationID = newFrameRequestID()
+	}
+	device.LastMutationResult = "device_updated"
 	if err := s.DB.Omit("Apps").Save(device).Error; err != nil {
 		http.Error(w, "Failed to update device", http.StatusInternalServerError)
 		return
@@ -909,10 +1009,12 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 
 // InstallationUpdate represents the updatable fields for an app installation via API.
 type InstallationUpdate struct {
-	Enabled           *bool `json:"enabled"`
-	Pinned            *bool `json:"pinned"`
-	RenderIntervalMin *int  `json:"renderIntervalMin"`
-	DisplayTimeSec    *int  `json:"displayTimeSec"`
+	Enabled              *bool   `json:"enabled"`
+	Pinned               *bool   `json:"pinned"`
+	RenderIntervalMin    *int    `json:"renderIntervalMin"`
+	DisplayTimeSec       *int    `json:"displayTimeSec"`
+	ExpectedStateVersion *uint64 `json:"expectedStateVersion"`
+	MutationID           string  `json:"mutationID"`
 
 	// Schedule fields
 	StartTime *string   `json:"startTime"`
@@ -932,6 +1034,14 @@ func (s *Server) handlePatchInstallation(w http.ResponseWriter, r *http.Request)
 	iname := r.PathValue("iname")
 
 	device := GetDevice(r)
+	unlock := s.lockDevicePoll(device.ID)
+	defer unlock()
+	fresh, err := gorm.G[data.Device](s.DB).Preload("Apps", orderedAppsPreload).Where("id = ?", device.ID).First(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "device_reload_failed", "Device state could not be refreshed", nil)
+		return
+	}
+	device = &fresh
 
 	app := device.GetApp(iname)
 	if app == nil || app.Pushed {
@@ -940,11 +1050,15 @@ func (s *Server) handlePatchInstallation(w http.ResponseWriter, r *http.Request)
 	}
 
 	var update InstallationUpdate
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+	if !decodeAPIJSON(w, r, &update) {
+		return
+	}
+	if update.ExpectedStateVersion != nil && *update.ExpectedStateVersion != device.StateVersion {
+		writeAPIError(w, http.StatusConflict, "stale_state", "Device state changed before this app update was applied", nil)
 		return
 	}
 
+	disabledActiveApp := false
 	if update.Enabled != nil {
 		if !*update.Enabled && app.Enabled {
 			enabledCount, err := gorm.G[data.App](s.DB).Where("device_id = ? AND pushed = ? AND enabled = ? AND id <> ?", device.ID, false, true, app.ID).Count(r.Context(), "*")
@@ -953,31 +1067,22 @@ func (s *Server) handlePatchInstallation(w http.ResponseWriter, r *http.Request)
 				return
 			}
 			if enabledCount == 0 {
-				http.Error(w, "At least one restorable app must remain enabled", http.StatusConflict)
+				writeAPIError(w, http.StatusConflict, "sole_enabled_app", "At least one app must remain enabled", nil)
 				return
 			}
 		}
 		app.Enabled = *update.Enabled
 		if !app.Enabled {
-			// Delete associated webp files when app is disabled
-			webpDir, err := s.ensureDeviceImageDir(device.ID)
-			if err != nil {
-				slog.Error("Failed to get device webp directory for app disable cleanup", "device_id", device.ID, "error", err)
-				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-				return
+			if optionalString(device.DisplayingApp) == app.Iname {
+				disabledActiveApp = true
+				device.DisplayingApp = nil
+				device.LastAppIndex = expandedIndexForInstallation(device, app.Iname)
 			}
-			matches, _ := filepath.Glob(filepath.Join(webpDir, fmt.Sprintf("*-%s.webp", app.Iname)))
-			for _, match := range matches {
-				if err := os.Remove(match); err != nil {
-					slog.Error("Failed to remove webp file on app disable", "path", match, "error", err)
-				}
+			if optionalString(device.DisplayRestoreApp) == app.Iname {
+				device.DisplayRestoreApp = nil
 			}
-			// Also check for pushed webp files
-			pushedWebpPath := filepath.Join(webpDir, "pushed", fmt.Sprintf("%s.webp", app.Iname))
-			if _, err := os.Stat(pushedWebpPath); err == nil {
-				if err := os.Remove(pushedWebpPath); err != nil {
-					slog.Error("Failed to remove pushed webp file on app disable", "path", pushedWebpPath, "error", err)
-				}
+			if optionalString(device.PinnedApp) == app.Iname {
+				device.PinnedApp = nil
 			}
 		} else {
 			// Reset LastRender when app is enabled
@@ -993,17 +1098,12 @@ func (s *Server) handlePatchInstallation(w http.ResponseWriter, r *http.Request)
 	if update.Pinned != nil {
 		if *update.Pinned {
 			if !app.Enabled || app.EmptyLastRender || app.LastRenderResult == "hidden" || app.LastRenderResult == "failure" || app.LastRenderResult == "upstream_failure" {
-				http.Error(w, "A disabled, hidden, or failing app cannot be pinned", http.StatusConflict)
+				writeAPIError(w, http.StatusConflict, "app_not_restorable", "A disabled, hidden, or failing app cannot be pinned", nil)
 				return
 			}
 			device.PinnedApp = &app.Iname
 		} else if device.PinnedApp != nil && *device.PinnedApp == app.Iname {
 			device.PinnedApp = nil
-		}
-		// Save device for pinned change
-		if err := s.DB.Omit("Apps").Save(device).Error; err != nil {
-			http.Error(w, "Failed to update device pin status", http.StatusInternalServerError)
-			return
 		}
 	}
 
@@ -1087,9 +1187,29 @@ func (s *Server) handlePatchInstallation(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if err := s.DB.Save(app).Error; err != nil {
+	mutationID := strings.TrimSpace(update.MutationID)
+	if mutationID == "" {
+		mutationID = newFrameRequestID()
+	}
+	if len(mutationID) > 64 {
+		mutationID = mutationID[:64]
+	}
+	device.StateVersion++
+	device.LastMutationID = mutationID
+	device.LastMutationResult = "installation_updated"
+	if err := s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(app).Error; err != nil {
+			return err
+		}
+		return tx.Omit("Apps").Save(device).Error
+	}); err != nil {
 		http.Error(w, "Failed to update app", http.StatusInternalServerError)
 		return
+	}
+	if disabledActiveApp && !device.Sleeping {
+		if err := s.restoreDisplayAfterPowerOn(r.Context(), device); err != nil {
+			slog.Warn("Failed to advance display after disabling active app", "device", device.ID, "installation", app.Iname, "error", err)
+		}
 	}
 
 	// Notify Dashboard
@@ -1097,7 +1217,7 @@ func (s *Server) handlePatchInstallation(w http.ResponseWriter, r *http.Request)
 	s.notifyDashboard(user.Username, WSEvent{Type: "apps_changed", DeviceID: device.ID})
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(app); err != nil {
+	if err := json.NewEncoder(w).Encode(s.toAppPayload(device, app)); err != nil {
 		slog.Error("Failed to encode app", "error", err)
 	}
 }

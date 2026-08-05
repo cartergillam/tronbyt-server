@@ -98,6 +98,8 @@ func (t *deviceEventTimeline) recent(deviceID string, limit int) []diagnosticEve
 type pollDiagnostic struct {
 	LastSuccess time.Time
 	LatencyMS   int64
+	FrameHash   string
+	App         string
 }
 
 type diagnosticFrame struct {
@@ -133,6 +135,17 @@ type deviceDiagnostics struct {
 	LastSuccessfulPoll      *time.Time        `json:"lastSuccessfulPoll,omitempty"`
 	RecentPollLatencyMS     *int64            `json:"recentPollLatencyMS,omitempty"`
 	DisplayingApp           string            `json:"displayingApp,omitempty"`
+	EnabledAppQueue         []string          `json:"enabledAppQueue"`
+	ActiveShowNowApp        string            `json:"activeShowNowApp,omitempty"`
+	RestoreTarget           string            `json:"restoreTarget,omitempty"`
+	Sleeping                bool              `json:"sleeping"`
+	LastFrameHash           string            `json:"lastFrameHash,omitempty"`
+	AppsRepository          string            `json:"appsRepository,omitempty"`
+	AppsRef                 string            `json:"appsRef,omitempty"`
+	AppsCommit              string            `json:"appsCommit,omitempty"`
+	LastMutationID          string            `json:"lastMutationID,omitempty"`
+	LastMutationResult      string            `json:"lastMutationResult,omitempty"`
+	StateVersion            uint64            `json:"stateVersion"`
 	LastRotationIndex       int               `json:"lastRotationIndex"`
 	EnabledAppCount         int               `json:"enabledAppCount"`
 	HiddenAppCount          int               `json:"hiddenAppCount"`
@@ -198,6 +211,9 @@ func (s *Server) buildDeviceDiagnostics(device *data.Device) deviceDiagnostics {
 	result := deviceDiagnostics{
 		DeviceID: device.ID, Protocol: string(device.Info.ProtocolType), FirmwareVersion: device.Info.FirmwareVersion,
 		LastSeen: device.LastSeen, PollIntervalSeconds: interval, DisplayingApp: optionalString(device.DisplayingApp),
+		EnabledAppQueue: []string{}, ActiveShowNowApp: optionalString(device.ActiveShowNowApp),
+		RestoreTarget: optionalString(device.DisplayRestoreApp), Sleeping: device.Sleeping,
+		LastMutationID: device.LastMutationID, LastMutationResult: device.LastMutationResult, StateVersion: device.StateVersion,
 		LastRotationIndex: device.LastAppIndex, PendingRestore: optionalString(device.DisplayRestoreApp), PinnedApp: optionalString(device.PinnedApp),
 		EffectiveBrightnessMode: effectiveBrightnessMode(device), EffectiveBrightness: int(device.GetEffectiveBrightness()),
 		Timezone: device.GetTimezone(), Apps: []diagnosticApp{},
@@ -226,6 +242,12 @@ func (s *Server) buildDeviceDiagnostics(device *data.Device) deviceDiagnostics {
 		poll := value.(pollDiagnostic)
 		result.LastSuccessfulPoll = &poll.LastSuccess
 		result.RecentPollLatencyMS = &poll.LatencyMS
+		result.LastFrameHash = poll.FrameHash
+	}
+	if info := s.systemAppsInfo.Load(); info != nil {
+		result.AppsRepository = info.URL
+		result.AppsRef = info.Branch
+		result.AppsCommit = info.CommitHash
 	}
 	s.diagnosticsEvents.setHealth(device.ID, result.Connection)
 	result.Events = s.diagnosticsEvents.recent(device.ID, 50)
@@ -238,6 +260,7 @@ func (s *Server) buildDeviceDiagnostics(device *data.Device) deviceDiagnostics {
 		}
 		if app.Enabled {
 			result.EnabledAppCount++
+			result.EnabledAppQueue = append(result.EnabledAppQueue, app.Iname)
 		}
 		if app.LastRenderResult == "hidden" {
 			result.HiddenAppCount++
@@ -355,7 +378,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	revision := s.catalogueRevision(GetUser(r))
 	response := capabilityResponse{
 		ServerVersion: version.Version, APIVersion: "0.2",
-		Features:         []string{"capabilities", "device-diagnostics", "diagnostic-actions", "installation-preview", "catalogue-pagination", "catalogue-filters", "catalogue-compatibility", "icon-etag", "location-v1", "location-source", "temporary-push-v2", "firmware-update", "schema-v1"},
+		Features:         []string{"capabilities", "device-diagnostics", "diagnostic-actions", "installation-preview", "catalogue-pagination", "catalogue-filters", "catalogue-compatibility", "icon-etag", "location-v1", "location-source", "temporary-push-v2", "firmware-update", "schema-v1", "state-version-v1", "display-sleep-v1", "show-now-result-v1"},
 		SchemaFieldTypes: []string{"string", "multiline", "integer", "number", "boolean", "enum", "date", "time", "datetime", "secret", "colour", "location"},
 		IconRevision:     revision,
 	}

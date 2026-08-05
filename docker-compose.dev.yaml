@@ -18,6 +18,8 @@ services:
       - PGID=${GID:-${UID:-1000}}
       - ENABLE_PPROF=true
       - SYSTEM_APPS_REPO
+      - SYSTEM_APPS_REF
+      - SYSTEM_APPS_EXPECTED_COMMIT
       - PRODUCTION
       - LOG_LEVEL
       - ENABLE_USER_REGISTRATION
