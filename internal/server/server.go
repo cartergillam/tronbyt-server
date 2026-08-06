@@ -22,7 +22,9 @@ import (
 
 	"tronbyt-server/internal/apps"
 	"tronbyt-server/internal/config"
+	"tronbyt-server/internal/credentials"
 	"tronbyt-server/internal/gitutils"
+	"tronbyt-server/internal/provisioning"
 	syncer "tronbyt-server/internal/sync"
 	"tronbyt-server/web"
 
@@ -37,26 +39,29 @@ import (
 )
 
 type Server struct {
-	DB            *gorm.DB
-	Router        *http.ServeMux
-	DataDir       string
-	BaseTemplates *template.Template
-	PageTemplates map[string]*template.Template
-	Config        *config.Settings
-	Store         *sessions.CookieStore
-	Bundle        *i18n.Bundle // Add i18n bundle
-	Broadcaster   *syncer.Broadcaster
-	Upgrader      *websocket.Upgrader
-	PromRegistry  prometheus.Registerer
-	PromGatherer  prometheus.Gatherer
-	metrics       *appMetrics
-	OIDCProvider  *OIDCProvider
+	DB              *gorm.DB
+	Router          *http.ServeMux
+	DataDir         string
+	BaseTemplates   *template.Template
+	PageTemplates   map[string]*template.Template
+	Config          *config.Settings
+	Store           *sessions.CookieStore
+	Bundle          *i18n.Bundle // Add i18n bundle
+	Broadcaster     *syncer.Broadcaster
+	Upgrader        *websocket.Upgrader
+	PromRegistry    prometheus.Registerer
+	PromGatherer    prometheus.Gatherer
+	metrics         *appMetrics
+	OIDCProvider    *OIDCProvider
+	CredentialStore *credentials.Store
+	Provisioning    *provisioning.Service
 
 	systemAppsCache      []apps.AppMetadata
 	systemAppsCacheMutex sync.RWMutex
 	devicePollLocks      sync.Map
 	diagnosticsEvents    *deviceEventTimeline
 	pollDiagnostics      sync.Map
+	pairingAttempts      sync.Map
 	systemAppsInfo       atomic.Pointer[gitutils.RepoInfo]
 
 	// SchemaCache, when set, allows forcing a one-shot refetch of an app's
@@ -119,6 +124,22 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 		PromRegistry:      prometheus.DefaultRegisterer,
 		PromGatherer:      prometheus.DefaultGatherer,
 		diagnosticsEvents: newDeviceEventTimeline(100),
+	}
+	if cfg.ProviderCredentialMasterKey != "" {
+		store, err := credentials.NewStore(db, cfg.ProviderCredentialMasterKey)
+		if err != nil {
+			slog.Error("Provider credential store disabled", "reason", "invalid_master_key")
+		} else {
+			s.CredentialStore = store
+		}
+	}
+	if cfg.PairingCodeSecret != "" {
+		service, err := provisioning.NewService(db, cfg.PairingCodeSecret)
+		if err != nil {
+			slog.Error("Household pairing disabled", "reason", "invalid_pairing_secret")
+		} else {
+			s.Provisioning = service
+		}
 	}
 
 	// Load Settings from DB

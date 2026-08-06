@@ -1438,6 +1438,7 @@ func (s *Server) handleUpdateFirmwareSettingsAPI(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) SetupAPIRoutes() {
+	s.Router.Handle("POST /v0/pairing/redeem", http.HandlerFunc(s.handleRedeemPairingCode))
 	s.Router.Handle("GET /v0/capabilities", s.CatalogueAuthMiddleware(http.HandlerFunc(s.handleCapabilities)))
 	// API v0 Group - authenticated with Middleware
 	s.Router.Handle("GET /v0/catalogue", s.CatalogueAuthMiddleware(http.HandlerFunc(s.handleCatalogueList)))
@@ -1465,4 +1466,10 @@ func (s *Server) SetupAPIRoutes() {
 	s.Router.Handle("PATCH /v0/devices/{id}", s.APIAuthMiddleware(s.RequireDevice(s.handlePatchDevice)))
 	s.Router.Handle("PATCH /v0/devices/{id}/installations/{iname}", s.APIAuthMiddleware(s.RequireDevice(s.handlePatchInstallation)))
 	s.Router.Handle("DELETE /v0/devices/{id}/installations/{iname}", s.APIAuthMiddleware(s.RequireDevice(s.handleDeleteInstallationAPI)))
+	s.Router.Handle("POST /v0/household/members", s.APIAuthMiddleware(http.HandlerFunc(s.handleCreateHouseholdMember)))
+	s.Router.Handle("POST /v0/household/members/{memberID}/pairing-codes", s.APIAuthMiddleware(http.HandlerFunc(s.handleCreatePairingCode)))
+	s.Router.Handle("DELETE /v0/mobile-sessions/{sessionID}", s.APIAuthMiddleware(http.HandlerFunc(s.handleRevokeMobileSession)))
+	s.Router.Handle("PUT /v0/provider-credentials/{credentialID}", s.APIAuthMiddleware(http.HandlerFunc(s.handlePutProviderCredential)))
+	s.Router.Handle("GET /v0/provider-credentials/{credentialID}", s.APIAuthMiddleware(http.HandlerFunc(s.handleGetProviderCredentialMetadata)))
+	s.Router.Handle("POST /v0/devices/{id}/starter-bundles/{bundleID}", s.APIAuthMiddleware(s.RequireDevice(s.handleInstallStarterBundle)))
 }

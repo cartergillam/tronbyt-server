@@ -47,7 +47,8 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	// AutoMigrate before reading deployment settings so a fresh database has
 	// the settings table available.
-	if err := db.AutoMigrate(&data.User{}, &data.Device{}, &data.App{}, &data.WebAuthnCredential{}, &data.Setting{}, &data.OIDCIdentity{}); err != nil {
+	if err := db.AutoMigrate(&data.User{}, &data.Device{}, &data.App{}, &data.WebAuthnCredential{}, &data.Setting{}, &data.OIDCIdentity{},
+		&data.ProviderCredential{}, &data.Household{}, &data.HouseholdMember{}, &data.DeviceAssignment{}, &data.PairingCode{}, &data.MobileSession{}); err != nil {
 		return fmt.Errorf("failed to migrate schema: %w", err)
 	}
 	if !cfg.SystemAppsRepoExplicit() {

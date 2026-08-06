@@ -83,7 +83,8 @@ func openDatabase() (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = db.AutoMigrate(&data.User{}, &data.Device{}, &data.App{}, &data.WebAuthnCredential{}, &data.Setting{}, &data.OIDCIdentity{})
+	err = db.AutoMigrate(&data.User{}, &data.Device{}, &data.App{}, &data.WebAuthnCredential{}, &data.Setting{}, &data.OIDCIdentity{},
+		&data.ProviderCredential{}, &data.Household{}, &data.HouseholdMember{}, &data.DeviceAssignment{}, &data.PairingCode{}, &data.MobileSession{})
 	return db, err
 }
 

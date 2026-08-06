@@ -219,24 +219,30 @@ func normalizeSchemaBytes(raw []byte) (normalizedSchema, error) {
 }
 
 type catalogueApp struct {
-	ID                  string            `json:"id"`
-	Name                string            `json:"name"`
-	Description         string            `json:"description"`
-	Author              string            `json:"author"`
-	Category            string            `json:"category,omitempty"`
-	Tags                []string          `json:"tags"`
-	Repository          string            `json:"repository"`
-	IconURL             *string           `json:"iconURL"`
-	Configurable        bool              `json:"configurable"`
-	Compatible          *bool             `json:"compatible"`
-	Published           string            `json:"published,omitempty"`
-	Updated             string            `json:"updated,omitempty"`
-	RecommendedInterval int               `json:"recommendedRenderIntervalMin,omitempty"`
-	Featured            bool              `json:"featured"`
-	LocationAware       bool              `json:"locationAware"`
-	Installed           bool              `json:"installed"`
-	Schema              *normalizedSchema `json:"schema,omitempty"`
-	meta                apps.AppMetadata
+	ID                             string            `json:"id"`
+	Name                           string            `json:"name"`
+	Description                    string            `json:"description"`
+	Author                         string            `json:"author"`
+	Category                       string            `json:"category,omitempty"`
+	Tags                           []string          `json:"tags"`
+	Repository                     string            `json:"repository"`
+	IconURL                        *string           `json:"iconURL"`
+	Configurable                   bool              `json:"configurable"`
+	Compatible                     *bool             `json:"compatible"`
+	Published                      string            `json:"published,omitempty"`
+	Updated                        string            `json:"updated,omitempty"`
+	RecommendedInterval            int               `json:"recommendedRenderIntervalMin,omitempty"`
+	Featured                       bool              `json:"featured"`
+	LocationAware                  bool              `json:"locationAware"`
+	Installed                      bool              `json:"installed"`
+	Verified                       bool              `json:"verified"`
+	Recommended                    bool              `json:"recommended"`
+	VerifiedVersion                string            `json:"verifiedVersion,omitempty"`
+	VerificationDate               string            `json:"verificationDate,omitempty"`
+	CompatibilityNotes             string            `json:"compatibilityNotes,omitempty"`
+	PreferredConfigurationDefaults map[string]any    `json:"preferredConfigurationDefaults,omitempty"`
+	Schema                         *normalizedSchema `json:"schema,omitempty"`
+	meta                           apps.AppMetadata
 }
 
 func nonNilStrings(value []string) []string {
@@ -259,7 +265,7 @@ func (s *Server) catalogueForUser(user *data.User) []catalogueApp {
 			icon = &value
 		}
 		configurable := !strings.EqualFold(filepath.Ext(meta.FileName), ".webp")
-		result = append(result, catalogueApp{
+		item := catalogueApp{
 			ID: meta.ID, Name: meta.Name, Description: description, Author: meta.Author,
 			Category: meta.Category, Tags: nonNilStrings(meta.Tags), Repository: repository,
 			IconURL: icon, Configurable: configurable, Published: meta.Published, Updated: meta.Updated,
@@ -267,7 +273,16 @@ func (s *Server) catalogueForUser(user *data.User) []catalogueApp {
 			Featured:            strings.EqualFold(meta.Category, "featured") || containsFold(meta.Tags, "featured"),
 			LocationAware:       containsFold(meta.Tags, "location") || containsFold(meta.Tags, "weather") || strings.Contains(strings.ToLower(description), "location"),
 			meta:                meta,
-		})
+		}
+		if verified, ok := verifiedMetadataFor(meta.ID); ok {
+			item.Verified = verified.Verified
+			item.Recommended = verified.Recommended
+			item.VerifiedVersion = verified.VerifiedVersion
+			item.VerificationDate = verified.VerificationDate
+			item.CompatibilityNotes = verified.CompatibilityNotes
+			item.PreferredConfigurationDefaults = verified.PreferredConfigurationDefaults
+		}
+		result = append(result, item)
 	}
 	for _, meta := range s.ListSystemApps() {
 		appendMetadata(meta, "system")
@@ -305,8 +320,9 @@ func containsFold(values []string, target string) bool {
 
 func catalogueRevisionForItems(items []catalogueApp) string {
 	hash := sha256.New()
+	_, _ = fmt.Fprintf(hash, "verified-manifest:%s\n", verifiedAppsRevision())
 	for _, item := range items {
-		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00%s\n", item.ID, item.Repository, item.Updated, item.meta.Preview)
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00%s\x00%t\x00%s\n", item.ID, item.Repository, item.Updated, item.meta.Preview, item.Verified, item.VerifiedVersion)
 	}
 	return hex.EncodeToString(hash.Sum(nil)[:8])
 }
@@ -461,7 +477,14 @@ func (s *Server) handleCatalogueList(w http.ResponseWriter, r *http.Request) {
 	deviceID := strings.TrimSpace(r.URL.Query().Get("deviceID"))
 	deviceAuthorized := false
 	if deviceID != "" {
-		if scoped, err := DeviceFromContext(r.Context()); err == nil {
+		if principal, err := MobilePrincipalFromContext(r.Context()); err == nil {
+			for _, assignedID := range principal.DeviceIDs {
+				if assignedID == deviceID {
+					deviceAuthorized = true
+					break
+				}
+			}
+		} else if scoped, err := DeviceFromContext(r.Context()); err == nil {
 			deviceAuthorized = scoped.ID == deviceID
 		} else if user := GetUser(r); user != nil {
 			count, _ := gorm.G[data.Device](s.DB).Where("id = ? AND username = ?", deviceID, user.Username).Count(r.Context(), "*")
@@ -487,7 +510,7 @@ func (s *Server) handleCatalogueList(w http.ResponseWriter, r *http.Request) {
 			slog.Debug("Catalogue app filtered", "app_id", item.ID, "reason", "search_mismatch", "search_length", len(search))
 			continue
 		}
-		if category != "" && strings.ToLower(item.Category) != category {
+		if category != "" && !(category == "verified" && item.Verified) && strings.ToLower(item.Category) != category {
 			slog.Debug("Catalogue app filtered", "app_id", item.ID, "reason", "category_mismatch", "requested_category", category)
 			continue
 		}
@@ -508,7 +531,17 @@ func (s *Server) handleCatalogueList(w http.ResponseWriter, r *http.Request) {
 		}
 		filtered = append(filtered, item)
 	}
-	if r.URL.Query().Get("sort") == "recent" {
+	if search != "" {
+		sort.SliceStable(filtered, func(i, j int) bool {
+			if filtered[i].Verified != filtered[j].Verified {
+				return filtered[i].Verified
+			}
+			if filtered[i].Recommended != filtered[j].Recommended {
+				return filtered[i].Recommended
+			}
+			return strings.ToLower(filtered[i].Name) < strings.ToLower(filtered[j].Name)
+		})
+	} else if r.URL.Query().Get("sort") == "recent" {
 		sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].Updated > filtered[j].Updated })
 	} else if r.URL.Query().Get("sort") == "featured" {
 		sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].Featured && !filtered[j].Featured })
@@ -548,7 +581,7 @@ func (s *Server) handleCatalogueList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"apps": filtered[offset:end], "offset": offset, "limit": limit, "total": total, "nextOffset": nextOffset,
-		"repositoryRevision": revision, "iconRevision": revision, "schemaVersion": "1",
+		"repositoryRevision": revision, "verifiedManifestRevision": verifiedAppsRevision(), "iconRevision": revision, "schemaVersion": "1",
 	})
 }
 

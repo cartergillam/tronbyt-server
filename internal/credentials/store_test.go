@@ -1,0 +1,70 @@
+package credentials
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"testing"
+
+	"tronbyt-server/internal/data"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+)
+
+func testStore(t *testing.T) (*Store, *gorm.DB) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&data.ProviderCredential{}))
+	key := make([]byte, 32)
+	_, err = rand.Read(key)
+	require.NoError(t, err)
+	store, err := NewStore(db, base64.StdEncoding.EncodeToString(key))
+	require.NoError(t, err)
+	return store, db
+}
+
+func TestCredentialEncryptionRotationAndMetadataRedaction(t *testing.T) {
+	store, db := testStore(t)
+	ctx := context.Background()
+	first, err := store.Put(ctx, "market-primary", "twelve-data", "household", "home-1", "first-secret")
+	require.NoError(t, err)
+	assert.Equal(t, uint(1), first.KeyVersion)
+
+	var stored data.ProviderCredential
+	require.NoError(t, db.First(&stored, "id = ?", "market-primary").Error)
+	assert.NotContains(t, string(stored.Ciphertext), "first-secret")
+	assert.NotEmpty(t, stored.Nonce)
+	encoded, err := json.Marshal(first)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "secret")
+	assert.NotContains(t, string(encoded), "ciphertext")
+
+	resolved, err := store.Resolve(ctx, "market-primary", "household", "home-1")
+	require.NoError(t, err)
+	assert.Equal(t, "first-secret", resolved)
+
+	rotated, err := store.Put(ctx, "market-primary", "twelve-data", "household", "home-1", "second-secret")
+	require.NoError(t, err)
+	assert.Equal(t, uint(2), rotated.KeyVersion)
+	resolved, err = store.Resolve(ctx, "market-primary", "household", "home-1")
+	require.NoError(t, err)
+	assert.Equal(t, "second-secret", resolved)
+}
+
+func TestCredentialScopeIsolationAndMissingMasterKey(t *testing.T) {
+	store, _ := testStore(t)
+	ctx := context.Background()
+	_, err := store.Put(ctx, "weather", "openweather", "device", "display-a", "private")
+	require.NoError(t, err)
+	_, err = store.Resolve(ctx, "weather", "device", "display-b")
+	assert.ErrorIs(t, err, ErrScopeMismatch)
+	_, err = store.Put(ctx, "weather", "openweather", "device", "display-b", "replacement")
+	assert.ErrorIs(t, err, ErrScopeMismatch)
+	_, err = NewStore(nil, "")
+	assert.ErrorIs(t, err, ErrMasterKeyUnavailable)
+}

@@ -366,27 +366,37 @@ func (s *Server) handleRestoreNormalRotation(w http.ResponseWriter, r *http.Requ
 }
 
 type capabilityResponse struct {
-	ServerVersion      string   `json:"serverVersion"`
-	APIVersion         string   `json:"apiVersion"`
-	Features           []string `json:"features"`
-	SchemaFieldTypes   []string `json:"schemaFieldTypes"`
-	IconRevision       string   `json:"iconRevision"`
-	MinimumIOSVersion  string   `json:"minimumIOSVersion,omitempty"`
-	AuthorizationScope string   `json:"authorizationScope"`
+	ServerVersion            string   `json:"serverVersion"`
+	APIVersion               string   `json:"apiVersion"`
+	Features                 []string `json:"features"`
+	SchemaFieldTypes         []string `json:"schemaFieldTypes"`
+	IconRevision             string   `json:"iconRevision"`
+	MinimumIOSVersion        string   `json:"minimumIOSVersion,omitempty"`
+	AuthorizationScope       string   `json:"authorizationScope"`
+	VerifiedManifestRevision string   `json:"verifiedManifestRevision"`
 }
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	revision := s.catalogueRevision(GetUser(r))
 	response := capabilityResponse{
 		ServerVersion: version.Version, APIVersion: "0.2",
-		Features:         []string{"capabilities", "device-diagnostics", "diagnostic-actions", "installation-preview", "catalogue-pagination", "catalogue-filters", "catalogue-compatibility", "icon-etag", "location-v1", "location-source", "temporary-push-v2", "firmware-update", "schema-v1", "state-version-v1", "display-sleep-v1", "show-now-result-v1"},
-		SchemaFieldTypes: []string{"string", "multiline", "integer", "number", "boolean", "enum", "date", "time", "datetime", "secret", "colour", "location"},
-		IconRevision:     revision,
+		Features:                 []string{"capabilities", "device-diagnostics", "diagnostic-actions", "installation-preview", "catalogue-pagination", "catalogue-filters", "catalogue-compatibility", "icon-etag", "location-v1", "location-source", "temporary-push-v2", "firmware-update", "schema-v1", "state-version-v1", "display-sleep-v1", "show-now-result-v1", "verified-apps-v1", "provider-contracts-v1"},
+		SchemaFieldTypes:         []string{"string", "multiline", "integer", "number", "boolean", "enum", "date", "time", "datetime", "secret", "colour", "location"},
+		IconRevision:             revision,
+		VerifiedManifestRevision: verifiedAppsRevision(),
 	}
-	if _, err := DeviceFromContext(r.Context()); err == nil {
+	if _, err := MobilePrincipalFromContext(r.Context()); err == nil {
+		response.AuthorizationScope = "household_member"
+	} else if _, err := DeviceFromContext(r.Context()); err == nil {
 		response.AuthorizationScope = "device"
 	} else {
 		response.AuthorizationScope = "user"
+	}
+	if s.Provisioning != nil {
+		response.Features = append(response.Features, "household-pairing-v1", "starter-bundles-v1")
+	}
+	if s.CredentialStore != nil {
+		response.Features = append(response.Features, "managed-provider-credentials-v1")
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, max-age=300")

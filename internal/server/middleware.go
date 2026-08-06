@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"tronbyt-server/internal/data"
+	"tronbyt-server/internal/provisioning"
 
 	"gorm.io/gorm"
 )
@@ -22,9 +23,10 @@ import (
 type contextKey string
 
 const (
-	userContextKey   contextKey = "user"
-	deviceContextKey contextKey = "device"
-	appContextKey    contextKey = "app"
+	userContextKey            contextKey = "user"
+	deviceContextKey          contextKey = "device"
+	appContextKey             contextKey = "app"
+	mobilePrincipalContextKey contextKey = "mobile_principal"
 )
 
 // APIAuthMiddleware authenticates requests using the Authorization header (API Key).
@@ -45,6 +47,29 @@ func (s *Server) APIAuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		if apiKey == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if strings.HasPrefix(apiKey, "tm_") && s.Provisioning != nil {
+			if principal, err := s.Provisioning.Authenticate(r.Context(), apiKey); err == nil {
+				user, userErr := gorm.G[data.User](s.DB).Where("username = ?", principal.OwnerUsername).First(r.Context())
+				if userErr != nil {
+					http.Error(w, "Unauthorized", http.StatusUnauthorized)
+					return
+				}
+				if len(principal.DeviceIDs) > 0 {
+					devices, devicesErr := gorm.G[data.Device](s.DB).Preload("Apps", orderedAppsPreload).Where("id IN ?", principal.DeviceIDs).Find(r.Context())
+					if devicesErr != nil {
+						http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+						return
+					}
+					user.Devices = devices
+				}
+				ctx := context.WithValue(r.Context(), userContextKey, &user)
+				ctx = context.WithValue(ctx, mobilePrincipalContextKey, &principal)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -114,6 +139,22 @@ func (s *Server) CatalogueAuthMiddleware(next http.Handler) http.Handler {
 		}
 		if authHeader == "" {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if strings.HasPrefix(authHeader, "tm_") && s.Provisioning != nil {
+			principal, authErr := s.Provisioning.Authenticate(r.Context(), authHeader)
+			if authErr != nil {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			user, userErr := gorm.G[data.User](s.DB).Where("username = ?", principal.OwnerUsername).First(r.Context())
+			if userErr != nil {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			ctx := context.WithValue(r.Context(), userContextKey, &user)
+			ctx = context.WithValue(ctx, mobilePrincipalContextKey, &principal)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 		user, err := gorm.G[data.User](s.DB).Where("api_key = ?", authHeader).First(r.Context())
@@ -270,6 +311,14 @@ func UserFromContext(ctx context.Context) (*data.User, error) {
 		return nil, errors.New("user not found in context")
 	}
 	return u, nil
+}
+
+func MobilePrincipalFromContext(ctx context.Context) (*provisioning.Principal, error) {
+	principal, ok := ctx.Value(mobilePrincipalContextKey).(*provisioning.Principal)
+	if !ok || principal == nil {
+		return nil, errors.New("mobile principal not found in context")
+	}
+	return principal, nil
 }
 
 // DeviceFromContext retrieves the Device from the context.

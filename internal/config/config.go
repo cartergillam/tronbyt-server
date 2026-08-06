@@ -10,29 +10,31 @@ import (
 )
 
 type Settings struct {
-	DBDSN                  string `env:"DB_DSN"                   envDefault:"data/tronbyt.db"`
-	DataDir                string `env:"DATA_DIR"                 envDefault:"data"`
-	Production             bool   `env:"PRODUCTION"               envDefault:"true"`
-	EnableUserRegistration bool   `env:"ENABLE_USER_REGISTRATION" envDefault:"true"`
-	EnablePprof            bool   `env:"ENABLE_PPROF"`
-	MaxUsers               int    `env:"MAX_USERS"`
-	SingleUserAutoLogin    bool   `env:"SINGLE_USER_AUTO_LOGIN"`
-	SystemAppsAutoRefresh  bool   `env:"SYSTEM_APPS_AUTO_REFRESH"`
-	SystemAppsRepo         string `env:"SYSTEM_APPS_REPO"         envDefault:"https://github.com/tronbyt/apps.git"`
-	SystemAppsRef          string `env:"SYSTEM_APPS_REF"          envDefault:"main"`
-	SystemAppsExpectedSHA  string `env:"SYSTEM_APPS_EXPECTED_COMMIT"`
-	GitHubToken            string `env:"GITHUB_TOKEN"`
-	RedisURL               string `env:"REDIS_URL"`
-	Host                   string `env:"TRONBYT_HOST"             envDefault:""`
-	Port                   string `env:"TRONBYT_PORT"             envDefault:"8000"`
-	UnixSocket             string `env:"TRONBYT_UNIX_SOCKET"`
-	SSLKeyFile             string `env:"TRONBYT_SSL_KEYFILE"`
-	SSLCertFile            string `env:"TRONBYT_SSL_CERTFILE"`
-	TrustedProxies         string `env:"TRONBYT_TRUSTED_PROXIES"`
-	LogLevel               string `env:"LOG_LEVEL"                envDefault:"INFO"`
-	LogFormat              string `env:"LOG_FORMAT"               envDefault:"text"`
-	EnableUpdateChecks     bool   `env:"ENABLE_UPDATE_CHECKS"     envDefault:"true"`
-	AltSvcMode             string `env:"ALT_SVC_MODE"             envDefault:"external"` // "internal" or "external"
+	DBDSN                       string `env:"DB_DSN"                   envDefault:"data/tronbyt.db"`
+	DataDir                     string `env:"DATA_DIR"                 envDefault:"data"`
+	Production                  bool   `env:"PRODUCTION"               envDefault:"true"`
+	EnableUserRegistration      bool   `env:"ENABLE_USER_REGISTRATION" envDefault:"true"`
+	EnablePprof                 bool   `env:"ENABLE_PPROF"`
+	MaxUsers                    int    `env:"MAX_USERS"`
+	SingleUserAutoLogin         bool   `env:"SINGLE_USER_AUTO_LOGIN"`
+	SystemAppsAutoRefresh       bool   `env:"SYSTEM_APPS_AUTO_REFRESH"`
+	SystemAppsRepo              string `env:"SYSTEM_APPS_REPO"         envDefault:"https://github.com/tronbyt/apps.git"`
+	SystemAppsRef               string `env:"SYSTEM_APPS_REF"          envDefault:"main"`
+	SystemAppsExpectedSHA       string `env:"SYSTEM_APPS_EXPECTED_COMMIT"`
+	GitHubToken                 string `env:"GITHUB_TOKEN"`
+	RedisURL                    string `env:"REDIS_URL"`
+	Host                        string `env:"TRONBYT_HOST"             envDefault:""`
+	Port                        string `env:"TRONBYT_PORT"             envDefault:"8000"`
+	UnixSocket                  string `env:"TRONBYT_UNIX_SOCKET"`
+	SSLKeyFile                  string `env:"TRONBYT_SSL_KEYFILE"`
+	SSLCertFile                 string `env:"TRONBYT_SSL_CERTFILE"`
+	TrustedProxies              string `env:"TRONBYT_TRUSTED_PROXIES"`
+	LogLevel                    string `env:"LOG_LEVEL"                envDefault:"INFO"`
+	LogFormat                   string `env:"LOG_FORMAT"               envDefault:"text"`
+	EnableUpdateChecks          bool   `env:"ENABLE_UPDATE_CHECKS"     envDefault:"true"`
+	AltSvcMode                  string `env:"ALT_SVC_MODE"             envDefault:"external"` // "internal" or "external"
+	ProviderCredentialMasterKey string `env:"PROVIDER_CREDENTIAL_MASTER_KEY"`
+	PairingCodeSecret           string `env:"PAIRING_CODE_SECRET"`
 
 	// OIDC Configuration
 	OIDCEnabled         bool   `env:"OIDC_ENABLED"`

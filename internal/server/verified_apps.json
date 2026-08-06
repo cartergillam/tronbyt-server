@@ -1,0 +1,36 @@
+{
+  "og-clock": {
+    "verified": true,
+    "recommended": true,
+    "verifiedVersion": "9e98e9617",
+    "verificationDate": "2026-08-06",
+    "compatibilityNotes": "Physically validated on a 64x32 MatrixPortal S3 display using the device timezone.",
+    "preferredConfigurationDefaults": {
+      "timezone_source": "device"
+    }
+  },
+  "mlb-game": {
+    "verified": true,
+    "recommended": true,
+    "verifiedVersion": "9e98e9617",
+    "verificationDate": "2026-08-06",
+    "compatibilityNotes": "Physically validated with device-local game selection and Dim team-colour background.",
+    "preferredConfigurationDefaults": {
+      "team_color_background_style": "dim"
+    }
+  },
+  "cfl-scores": {
+    "verified": true,
+    "recommended": true,
+    "verifiedVersion": "9e98e9617",
+    "verificationDate": "2026-08-06",
+    "compatibilityNotes": "Physically validated on a 64x32 MatrixPortal S3 display."
+  },
+  "quote-of-the-day": {
+    "verified": true,
+    "recommended": false,
+    "verifiedVersion": "9e98e9617",
+    "verificationDate": "2026-08-06",
+    "compatibilityNotes": "Installation flow physically validated; upstream quote availability can affect preview rendering."
+  }
+}
