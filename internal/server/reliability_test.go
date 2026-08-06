@@ -184,12 +184,42 @@ func TestClockRenderDueAndBoundaryDwell(t *testing.T) {
 	lastRender := boundary.Add(-30 * time.Second)
 	app := &data.App{LastRender: lastRender, UInterval: 15, NextRenderAt: &boundary}
 
-	assert.False(t, renderDue(boundary.Add(-time.Nanosecond), app), "cached frame remains valid before its exact boundary")
+	assert.False(t, renderDue(boundary.Add(-100*time.Millisecond), app), "12:34:59.900 remains valid only until the exact boundary")
 	assert.True(t, renderDue(boundary, app), "delayed or exact-boundary polling must invalidate the cached minute")
-	assert.True(t, renderDue(boundary.Add(8*time.Second), app), "a delayed poll must render the current minute")
+	assert.True(t, renderDue(boundary.Add(2*time.Second), app), "a 12:35:02 delayed poll must render the current minute")
 	assert.Equal(t, 1, effectiveFrameDwell(boundary.Add(-750*time.Millisecond), 15, app))
 	assert.Equal(t, 10, effectiveFrameDwell(boundary.Add(-10*time.Second), 15, app))
 	assert.Equal(t, 15, effectiveFrameDwell(boundary.Add(-30*time.Second), 15, app))
+}
+
+func TestClockRenderContextIncludesTimezoneConfigurationAndDST(t *testing.T) {
+	toronto := "America/Toronto"
+	utc := "UTC"
+	path := "system-apps/apps/ogclock/og_clock.star"
+	app := &data.App{Path: &path, Config: data.JSONMap{"timezone_source": "device", "twenty_four_hour": false}}
+	device := &data.Device{Type: data.DeviceMatrixPortal, Timezone: &toronto}
+	torontoHash := renderContextHash(device, app)
+	device.Timezone = &utc
+	assert.NotEqual(t, torontoHash, renderContextHash(device, app), "server timezone cannot substitute for device timezone")
+	device.Timezone = &toronto
+	app.Config["twenty_four_hour"] = true
+	assert.NotEqual(t, torontoHash, renderContextHash(device, app), "configuration changes invalidate the frame cache")
+
+	location, err := time.LoadLocation(toronto)
+	require.NoError(t, err)
+	beforeFallback := time.Date(2026, 11, 1, 1, 59, 59, 900_000_000, location)
+	next := beforeFallback.Truncate(time.Minute).Add(time.Minute)
+	assert.True(t, next.After(beforeFallback))
+	assert.Equal(t, 0, next.Second(), "DST transitions retain an exact local-minute boundary")
+}
+
+func TestVisibleMinuteMarkerIsSanitizedMetadataOnly(t *testing.T) {
+	messages := []string{
+		"TRONBYT-VISIBLE-MINUTE: 2026-07-31T19:07-04:00",
+		"TRONBYT-NEXT-RENDER: 2026-07-31T23:08:00Z",
+	}
+	assert.Equal(t, "2026-07-31T19:07-04:00", markerValue(messages, visibleMinuteMarker))
+	assert.Equal(t, "2026-07-31T23:08:00Z", markerValue(messages, nextRenderMarker))
 }
 
 func TestDeviceEventTimelineIsBoundedAndRecordsHealthTransitions(t *testing.T) {

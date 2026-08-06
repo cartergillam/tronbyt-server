@@ -49,6 +49,14 @@ func TestBrightnessHeaderChangesWithoutFrameTransition(t *testing.T) {
 	if first.Body.String() != second.Body.String() {
 		t.Fatal("brightness-only update unexpectedly changed the frame")
 	}
+	device, err := gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").First(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostics := s.buildDeviceDiagnostics(&device)
+	if diagnostics.RequestedBrightness != 80 || diagnostics.EffectiveBrightness != 80 {
+		t.Fatalf("brightness diagnostics drifted: requested=%d effective=%d", diagnostics.RequestedBrightness, diagnostics.EffectiveBrightness)
+	}
 }
 
 func TestConcurrentHTTPPollsConsumeDistinctOneShotFrames(t *testing.T) {

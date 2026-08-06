@@ -188,7 +188,9 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 	webpPath = s.getAppWebpPath(deviceWebpDir, app)
 	if trace := selectionTrace(ctx); trace != nil {
 		trace.WebPPath = webpPath
-		if app.NextRenderAt != nil && time.Now().Before(*app.NextRenderAt) {
+		if trace.CacheDecision != "" {
+			// possiblyRender recorded the precise hit/miss reason.
+		} else if app.NextRenderAt != nil && time.Now().Before(*app.NextRenderAt) {
 			trace.CacheDecision = "cached_until_next_eligible_render"
 		} else {
 			trace.CacheDecision = app.LastRenderResult

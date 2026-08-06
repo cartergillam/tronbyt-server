@@ -93,6 +93,28 @@ func TestValidateConfigPatchAndSecretSanitization(t *testing.T) {
 	assert.Contains(t, fields, "count")
 }
 
+func TestMLBBackgroundLegacyMigrationAndRequiredTeamSchema(t *testing.T) {
+	raw := []byte(`{"version":"1","schema":[
+		{"type":"dropdown","id":"team","name":"Team Focus","default":"141","options":[{"display":"Toronto Blue Jays","value":"141"}]},
+		{"type":"dropdown","id":"team_color_background_style","name":"Team-colour background","default":"full","options":[{"display":"Off","value":"off"},{"display":"Dim","value":"dim"},{"display":"Full","value":"full"}]}
+	]}`)
+	schema, err := normalizeSchemaBytes(raw)
+	require.NoError(t, err)
+	require.True(t, schema.Fields[0].Required)
+
+	full, fields := validateConfigPatch(schema, map[string]any{"team": "141", "show_team_colored_logo_background": true}, nil)
+	require.Empty(t, fields)
+	assert.Equal(t, "full", full["team_color_background_style"])
+	assert.NotContains(t, full, "show_team_colored_logo_background")
+
+	off, fields := validateConfigPatch(schema, map[string]any{"team": "141", "show_team_coloured_logo_background": false}, nil)
+	require.Empty(t, fields)
+	assert.Equal(t, "off", off["team_color_background_style"])
+
+	_, fields = validateConfigPatch(schema, nil, map[string]any{"team_color_background_style": "dim"})
+	assert.Equal(t, "is required", fields["team"])
+}
+
 func TestMobilePreviewAndETag(t *testing.T) {
 	s := newTestServerAPI(t)
 	ctx := context.Background()
@@ -458,6 +480,41 @@ func TestInstallationCreateConfigAndDuplicate(t *testing.T) {
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusConflict, rr.Code)
+}
+
+func TestInstallationCreateIdempotentRetryUsesMutationID(t *testing.T) {
+	s := newTestServerAPI(t)
+	seedRenderableCatalogueApp(t, s)
+	body := []byte(`{
+		"appID":"mobiletest","name":"Mobile test","config":{"enabled":true},
+		"enabled":true,"displayTimeSec":15,"renderIntervalMin":5,
+		"mutationID":"install-retry-001"
+	}`)
+	request := func(payload []byte) *httptest.ResponseRecorder {
+		req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "device_api_key", payload)
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, req)
+		return rr
+	}
+	first := request(body)
+	require.Equal(t, http.StatusCreated, first.Code, first.Body.String())
+	var firstPayload struct {
+		Installation AppPayload `json:"installation"`
+	}
+	require.NoError(t, json.NewDecoder(first.Body).Decode(&firstPayload))
+
+	retry := request(body)
+	require.Equal(t, http.StatusOK, retry.Code, retry.Body.String())
+	var retryPayload struct {
+		Installation AppPayload `json:"installation"`
+	}
+	require.NoError(t, json.NewDecoder(retry.Body).Decode(&retryPayload))
+	assert.Equal(t, firstPayload.Installation.ID, retryPayload.Installation.ID)
+
+	var device data.Device
+	require.NoError(t, s.DB.First(&device, "id = ?", "testdevice").Error)
+	assert.Equal(t, "install-retry-001", device.LastMutationID)
+	assert.Equal(t, "installation_created", device.LastMutationResult)
 }
 
 func TestInstallationCreateRejectsInvalidAppAndForeignDevice(t *testing.T) {

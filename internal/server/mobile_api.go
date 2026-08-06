@@ -200,9 +200,16 @@ func normalizeSchemaBytes(raw []byte) (normalizedSchema, error) {
 			}
 			options = append(options, normalizedSchemaOption{Label: label, Value: option.Value})
 		}
+		required := field.Required
+		// Pixlet's historical Dropdown schema does not consistently serialize a
+		// required flag. An empty-default team selector is intentionally explicit:
+		// callers must choose a team before installing or saving.
+		if field.ID == "team" && strings.EqualFold(strings.TrimSpace(field.Name), "Team Focus") && typ == "enum" && len(options) > 0 {
+			required = true
+		}
 		result.Fields = append(result.Fields, normalizedSchemaField{
 			Key: field.ID, Title: field.Name, Description: field.Description,
-			Type: typ, Required: field.Required, Default: normalizeDefault(field, typ),
+			Type: typ, Required: required, Default: normalizeDefault(field, typ),
 			Minimum: field.Minimum, Maximum: field.Maximum, Options: options,
 			Secret: field.Secret, Order: i, Visibility: field.Visibility, SourceType: field.Type,
 			Pattern: field.Pattern, Placeholder: field.Placeholder,
@@ -685,18 +692,7 @@ func normalizeConfigValue(field *normalizedSchemaField, value any) (any, error) 
 }
 
 func validateConfigPatch(schema normalizedSchema, existing, patch map[string]any) (map[string]any, map[string]string) {
-	result := make(map[string]any, len(existing)+len(patch))
-	for key, value := range existing {
-		result[key] = value
-	}
-	if findSchemaField(schema, "show_team_colored_logo_background") != nil {
-		if _, canonicalPresent := result["show_team_colored_logo_background"]; !canonicalPresent {
-			if legacy, present := result["show_team_coloured_logo_background"]; present {
-				result["show_team_colored_logo_background"] = legacy
-			}
-		}
-		delete(result, "show_team_coloured_logo_background")
-	}
+	result := normalizedLegacyConfig(schema, existing)
 	fieldErrors := map[string]string{}
 	for key, value := range patch {
 		field := findSchemaField(schema, key)
@@ -728,6 +724,29 @@ func validateConfigPatch(schema normalizedSchema, existing, patch map[string]any
 		}
 	}
 	return result, fieldErrors
+}
+
+func normalizedLegacyConfig(schema normalizedSchema, existing map[string]any) map[string]any {
+	result := make(map[string]any, len(existing)+1)
+	for key, value := range existing {
+		result[key] = value
+	}
+	if findSchemaField(schema, "team_color_background_style") != nil {
+		if _, stylePresent := result["team_color_background_style"]; !stylePresent {
+			legacy, present := result["show_team_colored_logo_background"]
+			if !present {
+				legacy, present = result["show_team_coloured_logo_background"]
+			}
+			if enabled, ok := legacy.(bool); present && ok && !enabled {
+				result["team_color_background_style"] = "off"
+			} else {
+				result["team_color_background_style"] = "full"
+			}
+		}
+		delete(result, "show_team_colored_logo_background")
+		delete(result, "show_team_coloured_logo_background")
+	}
+	return result
 }
 
 func sanitizeConfig(schema normalizedSchema, config map[string]any) (map[string]any, map[string]bool) {
@@ -791,7 +810,7 @@ func (s *Server) installationAndSchema(ctx context.Context, device *data.Device,
 }
 
 func (s *Server) installationConfigPayload(device *data.Device, app *data.App, schema normalizedSchema) map[string]any {
-	config, secrets := sanitizeConfig(schema, app.Config)
+	config, secrets := sanitizeConfig(schema, normalizedLegacyConfig(schema, app.Config))
 	return map[string]any{
 		"installation": s.toAppPayload(device, app),
 		"appID":        app.Name,
@@ -859,12 +878,16 @@ func (s *Server) handleInstallationConfigPatch(w http.ResponseWriter, r *http.Re
 		return
 	}
 	now := time.Now()
+	contextApp := *app
+	contextApp.Config = updated
+	contextHash := renderContextHash(device, &contextApp)
 	err = s.DB.Transaction(func(tx *gorm.DB) error {
 		update := data.App{
 			Config: updated, LastRender: now,
-			EmptyLastRender: len(image) == 0,
+			EmptyLastRender:   len(image) == 0,
+			RenderContextHash: contextHash,
 		}
-		fields := []string{"Config", "LastRender", "EmptyLastRender"}
+		fields := []string{"Config", "LastRender", "EmptyLastRender", "RenderContextHash"}
 		if len(image) > 0 {
 			update.LastSuccessfulRender = &now
 			fields = append(fields, "LastSuccessfulRender")
@@ -881,7 +904,7 @@ func (s *Server) handleInstallationConfigPatch(w http.ResponseWriter, r *http.Re
 		writeAPIError(w, http.StatusInternalServerError, "save_failed", "Configuration could not be saved", nil)
 		return
 	}
-	app.Config, app.LastRender, app.EmptyLastRender = updated, now, len(image) == 0
+	app.Config, app.LastRender, app.EmptyLastRender, app.RenderContextHash = updated, now, len(image) == 0, contextHash
 	if len(image) > 0 {
 		app.LastSuccessfulRender = &now
 	}
@@ -897,10 +920,13 @@ type installationCreateRequest struct {
 	Enabled           *bool          `json:"enabled"`
 	DisplayTimeSec    int            `json:"displayTimeSec"`
 	RenderIntervalMin int            `json:"renderIntervalMin"`
+	MutationID        string         `json:"mutationID"`
 }
 
 func (s *Server) handleInstallationCreate(w http.ResponseWriter, r *http.Request) {
 	device, user := GetDevice(r), GetUser(r)
+	unlock := s.lockDevicePoll(device.ID)
+	defer unlock()
 	var request installationCreateRequest
 	if !decodeAPIJSON(w, r, &request) {
 		return
@@ -924,22 +950,46 @@ func (s *Server) handleInstallationCreate(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, http.StatusBadRequest, "invalid_app", "Catalogue app path is invalid", nil)
 		return
 	}
-	duplicate, err := gorm.G[data.App](s.DB).Where("device_id = ? AND path = ?", device.ID, relativePath).Count(r.Context(), "*")
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "database_error", "Installation state could not be checked", nil)
-		return
-	}
-	if duplicate > 0 {
-		writeAPIError(w, http.StatusConflict, "duplicate_installation", "This app is already installed on the device", nil)
-		return
-	}
 	schema, err := s.loadNormalizedSchema(r.Context(), item, device.Type.Supports2x())
 	if err != nil {
 		slog.Error("Failed to load installation schema", "app_id", item.ID, "error", err)
 		writeAPIError(w, http.StatusBadGateway, "schema_unavailable", "App schema could not be loaded", nil)
 		return
 	}
+	mutationID := strings.TrimSpace(request.MutationID)
+	if len(mutationID) > 64 {
+		mutationID = mutationID[:64]
+	}
+	existing, duplicateErr := gorm.G[data.App](s.DB).Where("device_id = ? AND path = ?", device.ID, relativePath).First(r.Context())
+	if duplicateErr == nil {
+		if mutationID != "" && device.LastMutationID == mutationID && device.LastMutationResult == "installation_created" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(s.installationConfigPayload(device, &existing, schema))
+			return
+		}
+		writeAPIError(w, http.StatusConflict, "duplicate_installation", "This app is already installed on the device", nil)
+		return
+	}
+	if !errors.Is(duplicateErr, gorm.ErrRecordNotFound) {
+		writeAPIError(w, http.StatusInternalServerError, "database_error", "Installation state could not be checked", nil)
+		return
+	}
+	configKeys := make([]string, 0, len(request.Config))
+	for key := range request.Config {
+		configKeys = append(configKeys, key)
+	}
+	sort.Strings(configKeys)
+	slog.Info("Installation request validated", "request_id", r.Header.Get("X-Request-ID"), "device_id", device.ID, "app_id", item.ID, "config_keys", configKeys, "mutation_id", mutationID)
 	config, fieldErrors := validateConfigPatch(schema, schemaDefaults(schema), request.Config)
+	for _, field := range schema.Fields {
+		if !field.Required {
+			continue
+		}
+		value, explicitlyProvided := request.Config[field.Key]
+		if !explicitlyProvided || value == nil || value == "" {
+			fieldErrors[field.Key] = "is required"
+		}
+	}
 	if len(fieldErrors) > 0 {
 		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_config", "Configuration validation failed", fieldErrors)
 		return
@@ -964,6 +1014,7 @@ func (s *Server) handleInstallationCreate(w http.ResponseWriter, r *http.Request
 	}
 	now := time.Now()
 	app.LastRender, app.EmptyLastRender = now, len(image) == 0
+	app.RenderContextHash = renderContextHash(device, &app)
 	if len(image) > 0 {
 		app.LastSuccessfulRender = &now
 	}
@@ -974,6 +1025,15 @@ func (s *Server) handleInstallationCreate(w http.ResponseWriter, r *http.Request
 		}
 		app.Order = maxOrder + 1
 		if err := gorm.G[data.App](tx).Create(r.Context(), &app); err != nil {
+			return err
+		}
+		device.StateVersion++
+		if mutationID == "" {
+			mutationID = newFrameRequestID()
+		}
+		device.LastMutationID = mutationID
+		device.LastMutationResult = "installation_created"
+		if err := tx.Omit("Apps").Save(device).Error; err != nil {
 			return err
 		}
 		if len(image) > 0 {

@@ -11,13 +11,14 @@ environment used by Docker Compose:
 ```dotenv
 SYSTEM_APPS_REPO=https://github.com/cartergillam/apps.git
 SYSTEM_APPS_REF=feature/mlb-clock-reliability
-SYSTEM_APPS_EXPECTED_COMMIT=abf24de2bc5b23b296ad755dddbf71b05f507f73
+SYSTEM_APPS_EXPECTED_COMMIT=9e98e9617d5db08c2cde6ef03431d9d6ce5a2441
 ```
 
-Commit `bbfcff4e0` contains Clock commit `bbfcff4e0` and has MLB commit
-`4b284f197` as its parent. The expected-commit pin prevents production from
-starting or refreshing against an unintended checkout. Move the pin only after
-validating the replacement apps commit.
+Commit `9e98e9617` adds the Clock timing marker and MLB Off/Dim/Full background
+styles. Its history contains Clock fix `bbfcff4e0` and MLB local-date/team-ID
+fix `4b284f197`. The expected-commit pin prevents production from starting or
+refreshing against an unintended checkout. Move the pin only after validating
+the replacement apps commit.
 
 After GitHub Actions publishes the server image, deploy by pulling that image
 and recreating the service with the same persistent data volume. Confirm one
@@ -25,7 +26,7 @@ startup record named `System apps checkout ready` contains:
 
 - repository `https://github.com/cartergillam/apps.git`;
 - ref `feature/mlb-clock-reliability`;
-- commit `bbfcff4e02aae5ea50e60a961a5456e7af329da5`;
+- commit `9e98e9617d5db08c2cde6ef03431d9d6ce5a2441`;
 - `update_succeeded=true`.
 
 Run the deployment assertion against the mounted checkout:

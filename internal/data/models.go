@@ -569,6 +569,7 @@ type App struct {
 	LastRenderResult    string       `json:"last_render_result"`
 	LastRenderMessage   string       `json:"last_render_message"`
 	NextRenderAt        *time.Time   `json:"next_render_at"`
+	RenderContextHash   string       `json:"render_context_hash,omitempty"`
 	ConsecutiveFailures int          `json:"consecutive_failures"`
 	ConsecutiveHidden   int          `json:"consecutive_hidden"`
 	AutoPin             bool         `json:"auto_pin"`

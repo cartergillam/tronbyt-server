@@ -102,8 +102,8 @@ func (s *Server) refreshSystemRepo() error {
 	s.systemAppsInfo.Store(info)
 	invalidated, err := gorm.G[data.App](s.DB).
 		Where("path LIKE ?", "%system-apps/%").
-		Select("LastRender", "NextRenderAt").
-		Updates(context.Background(), data.App{LastRender: time.Time{}, NextRenderAt: nil})
+		Select("LastRender", "NextRenderAt", "RenderContextHash").
+		Updates(context.Background(), data.App{LastRender: time.Time{}, NextRenderAt: nil, RenderContextHash: ""})
 	if err != nil {
 		return fmt.Errorf("invalidate system-app renders: %w", err)
 	}

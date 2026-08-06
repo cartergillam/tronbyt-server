@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -169,7 +170,27 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 
 	// 3. Starlark App - Check interval or an app-provided eligibility boundary.
 	now := time.Now()
-	shouldRender := renderDue(now, app)
+	contextHash := renderContextHash(device, app)
+	contextChanged := app.RenderContextHash != contextHash
+	shouldRender := contextChanged || renderDue(now, app)
+	cacheDecision := "hit"
+	if contextChanged {
+		cacheDecision = "miss_context_changed"
+	} else if shouldRender {
+		cacheDecision = "miss_render_due"
+	}
+	if trace := selectionTrace(ctx); trace != nil {
+		trace.CacheDecision = cacheDecision
+	}
+	localNow := now.In(deviceLocation(device))
+	slog.Debug("Render cache decision",
+		"app", appBasename,
+		"render_timestamp", now.UTC().Format(time.RFC3339Nano),
+		"device_local_timestamp", localNow.Format(time.RFC3339Nano),
+		"device_timezone", device.GetTimezone(),
+		"cache_decision", cacheDecision,
+		"context_hash", contextHash,
+	)
 	if shouldRender {
 		slog.Info("Rendering app", "app", appBasename)
 
@@ -184,6 +205,20 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 		empty := len(imgBytes) == 0
 		success := err == nil && !empty
 		result, message, nextRenderAt := classifyRenderResult(now, imgBytes, messages, err, app.UInterval)
+		visibleMinute := markerValue(messages, visibleMinuteMarker)
+		if visibleMinute == "" {
+			visibleMinute = localNow.Format("2006-01-02T15:04-07:00")
+		}
+		returnedDwell := effectiveFrameDwell(now, device.GetEffectiveDwellTime(app), &data.App{NextRenderAt: nextRenderAt})
+		slog.Info("Render timing",
+			"app", appBasename,
+			"render_timestamp", now.UTC().Format(time.RFC3339Nano),
+			"device_local_timestamp", localNow.Format(time.RFC3339Nano),
+			"next_render_timestamp", optionalTime(nextRenderAt),
+			"cache_decision", cacheDecision,
+			"returned_dwell_seconds", returnedDwell,
+			"rendered_visible_minute", visibleMinute,
+		)
 
 		s.metrics.renderDuration.Observe(renderDur.Seconds())
 		switch {
@@ -207,6 +242,7 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 			LastRenderResult:  result,
 			LastRenderMessage: message,
 			NextRenderAt:      nextRenderAt,
+			RenderContextHash: contextHash,
 		}
 		switch result {
 		case "visible":
@@ -225,13 +261,13 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 			appUpdates.LastSuccessfulRender = &now
 			q = q.Select(
 				"LastRender", "LastRenderDur", "EmptyLastRender", "RenderMessages",
-				"LastRenderResult", "LastRenderMessage", "NextRenderAt",
+				"LastRenderResult", "LastRenderMessage", "NextRenderAt", "RenderContextHash",
 				"ConsecutiveFailures", "ConsecutiveHidden", "LastSuccessfulRender",
 			)
 		} else {
 			q = q.Select(
 				"LastRender", "LastRenderDur", "EmptyLastRender", "RenderMessages",
-				"LastRenderResult", "LastRenderMessage", "NextRenderAt",
+				"LastRenderResult", "LastRenderMessage", "NextRenderAt", "RenderContextHash",
 				"ConsecutiveFailures", "ConsecutiveHidden",
 			)
 		}
@@ -265,6 +301,7 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 		app.LastRenderResult = result
 		app.LastRenderMessage = message
 		app.NextRenderAt = nextRenderAt
+		app.RenderContextHash = contextHash
 		app.ConsecutiveFailures = appUpdates.ConsecutiveFailures
 		app.ConsecutiveHidden = appUpdates.ConsecutiveHidden
 
@@ -292,9 +329,53 @@ func renderDue(now time.Time, app *data.App) bool {
 
 const (
 	nextRenderMarker    = "TRONBYT-NEXT-RENDER:"
+	visibleMinuteMarker = "TRONBYT-VISIBLE-MINUTE:"
 	hiddenUntilMarker   = "TRONBYT-HIDDEN-UNTIL:"
 	renderFailureMarker = "TRONBYT-RENDER-FAILURE:"
 )
+
+func renderContextHash(device *data.Device, app *data.App) string {
+	context := map[string]any{
+		"config":     app.Config,
+		"timezone":   device.GetTimezone(),
+		"location":   device.Location,
+		"supports2x": device.Type.Supports2x(),
+	}
+	if device.Locale != nil {
+		context["locale"] = *device.Locale
+	}
+	encoded, err := json.Marshal(context)
+	if err != nil {
+		return "unavailable"
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+func deviceLocation(device *data.Device) *time.Location {
+	location, err := time.LoadLocation(device.GetTimezone())
+	if err != nil {
+		return time.UTC
+	}
+	return location
+}
+
+func markerValue(messages []string, prefix string) string {
+	for _, raw := range messages {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
+}
+
+func optionalTime(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
 
 func classifyRenderResult(now time.Time, image []byte, messages []string, renderErr error, intervalMinutes int) (string, string, *time.Time) {
 	hidden := false

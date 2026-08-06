@@ -155,6 +155,7 @@ type deviceDiagnostics struct {
 	PendingRestore          string            `json:"pendingRestore,omitempty"`
 	PinnedApp               string            `json:"pinnedApp,omitempty"`
 	EffectiveBrightnessMode string            `json:"effectiveBrightnessMode"`
+	RequestedBrightness     int               `json:"requestedBrightness"`
 	EffectiveBrightness     int               `json:"effectiveBrightness"`
 	Timezone                string            `json:"timezone"`
 	LocationSummary         string            `json:"locationSummary,omitempty"`
@@ -215,7 +216,7 @@ func (s *Server) buildDeviceDiagnostics(device *data.Device) deviceDiagnostics {
 		RestoreTarget: optionalString(device.DisplayRestoreApp), Sleeping: device.Sleeping,
 		LastMutationID: device.LastMutationID, LastMutationResult: device.LastMutationResult, StateVersion: device.StateVersion,
 		LastRotationIndex: device.LastAppIndex, PendingRestore: optionalString(device.DisplayRestoreApp), PinnedApp: optionalString(device.PinnedApp),
-		EffectiveBrightnessMode: effectiveBrightnessMode(device), EffectiveBrightness: int(device.GetEffectiveBrightness()),
+		EffectiveBrightnessMode: effectiveBrightnessMode(device), RequestedBrightness: int(device.Brightness), EffectiveBrightness: int(device.GetEffectiveBrightness()),
 		Timezone: device.GetTimezone(), Apps: []diagnosticApp{},
 	}
 	if device.HasLocation() {
