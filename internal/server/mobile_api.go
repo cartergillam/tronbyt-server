@@ -386,6 +386,10 @@ func (s *Server) handleInstallationPreview(w http.ResponseWriter, r *http.Reques
 	path := s.getAppWebpPath(filepath.Join(s.DataDir, "webp", device.ID), app)
 	stat, err := os.Stat(path)
 	if err != nil || stat.IsDir() || stat.Size() <= 0 || stat.Size() > 32<<20 {
+		if code, message, failed := installationPreviewFailure(app); failed {
+			writeAPIError(w, http.StatusFailedDependency, code, message, nil)
+			return
+		}
 		writeAPIError(w, http.StatusNotFound, "preview_not_found", "No rendered preview is available for this installation", nil)
 		return
 	}
@@ -407,6 +411,35 @@ func (s *Server) handleInstallationPreview(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Last-Modified", stat.ModTime().UTC().Format(http.TimeFormat))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(content)
+}
+
+func installationPreviewFailure(app *data.App) (string, string, bool) {
+	result := strings.ToLower(strings.TrimSpace(app.LastRenderResult))
+	message := sanitizedRenderMessage(app.LastRenderMessage)
+	if result == "empty" || app.EmptyLastRender && result == "" {
+		return "preview_empty_frame", "The app rendered an empty frame", true
+	}
+	if result != "failure" && result != "upstream_failure" {
+		return "", "", false
+	}
+	lower := strings.ToLower(message)
+	switch {
+	case strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out"):
+		return "preview_timeout", "The app preview render timed out", true
+	case strings.Contains(lower, "configuration") || strings.Contains(lower, "required"):
+		return "preview_invalid_config", firstNonEmpty(message, "The app configuration could not be rendered"), true
+	case result == "upstream_failure" || strings.Contains(lower, "nws") || strings.Contains(lower, "http") || strings.Contains(lower, "network") || strings.Contains(lower, "dial"):
+		return "preview_network_unavailable", firstNonEmpty(message, "A network dependency required by this app is unavailable"), true
+	default:
+		return "preview_render_failed", firstNonEmpty(message, "Pixlet could not render this app preview"), true
+	}
+}
+
+func firstNonEmpty(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func (s *Server) handleCatalogueList(w http.ResponseWriter, r *http.Request) {
@@ -449,10 +482,13 @@ func (s *Server) handleCatalogueList(w http.ResponseWriter, r *http.Request) {
 			compatible := true
 			item.Compatible = &compatible
 		}
-		if search != "" && !strings.Contains(strings.ToLower(item.Name+" "+item.Description+" "+item.Author+" "+strings.Join(item.Tags, " ")), search) {
+		searchable := strings.ToLower(item.ID + " " + item.Name + " " + item.Description + " " + item.Author + " " + item.Category + " " + strings.Join(item.Tags, " "))
+		if search != "" && !strings.Contains(searchable, search) {
+			slog.Debug("Catalogue app filtered", "app_id", item.ID, "reason", "search_mismatch", "search_length", len(search))
 			continue
 		}
 		if category != "" && strings.ToLower(item.Category) != category {
+			slog.Debug("Catalogue app filtered", "app_id", item.ID, "reason", "category_mismatch", "requested_category", category)
 			continue
 		}
 		if repository != "" && strings.ToLower(item.Repository) != repository {
@@ -817,6 +853,11 @@ func (s *Server) installationConfigPayload(device *data.Device, app *data.App, s
 		"schema":       schema,
 		"config":       config,
 		"savedSecrets": secrets,
+		"render": map[string]any{
+			"status":           app.LastRenderResult,
+			"message":          sanitizedRenderMessage(app.LastRenderMessage),
+			"previewAvailable": app.LastSuccessfulRender != nil && !app.EmptyLastRender,
+		},
 	}
 }
 
@@ -831,15 +872,14 @@ func (s *Server) handleInstallationConfigGet(w http.ResponseWriter, r *http.Requ
 	_ = json.NewEncoder(w).Encode(s.installationConfigPayload(device, app, schema))
 }
 
-func (s *Server) renderInstallation(ctx context.Context, device *data.Device, app *data.App, config map[string]any) ([]byte, error) {
+func (s *Server) renderInstallation(ctx context.Context, device *data.Device, app *data.App, config map[string]any) ([]byte, []string, error) {
 	path, err := securejoin.SecureJoin(s.DataDir, *app.Path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// RenderApp injects legacy runtime values such as $tz into its config map.
 	// Render a clone so those values are never persisted as user configuration.
-	image, _, err := s.RenderApp(ctx, device, app, path, maps.Clone(config))
-	return image, err
+	return s.RenderApp(ctx, device, app, path, maps.Clone(config))
 }
 
 func (s *Server) saveRenderedInstallationImage(device *data.Device, app *data.App, image []byte) error {
@@ -856,15 +896,29 @@ func (s *Server) saveRenderedInstallationImage(device *data.Device, app *data.Ap
 
 func (s *Server) handleInstallationConfigPatch(w http.ResponseWriter, r *http.Request) {
 	device := GetDevice(r)
+	unlock := s.lockDevicePoll(device.ID)
+	defer unlock()
+	fresh, err := gorm.G[data.Device](s.DB).Preload("Apps", orderedAppsPreload).Where("id = ?", device.ID).First(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "device_reload_failed", "Device state could not be refreshed", nil)
+		return
+	}
+	device = &fresh
 	app, schema, err := s.installationAndSchema(r.Context(), device, r.PathValue("installationID"))
 	if err != nil {
 		writeAPIError(w, http.StatusNotFound, "installation_not_found", "Installation not found", nil)
 		return
 	}
 	var request struct {
-		Config map[string]any `json:"config"`
+		Config               map[string]any `json:"config"`
+		ExpectedStateVersion *uint64        `json:"expectedStateVersion"`
+		MutationID           string         `json:"mutationID"`
 	}
 	if !decodeAPIJSON(w, r, &request) {
+		return
+	}
+	if request.ExpectedStateVersion != nil && *request.ExpectedStateVersion != device.StateVersion {
+		writeAPIError(w, http.StatusConflict, "stale_state", "Device state changed before this configuration was applied", nil)
 		return
 	}
 	updated, fieldErrors := validateConfigPatch(schema, app.Config, request.Config)
@@ -872,12 +926,24 @@ func (s *Server) handleInstallationConfigPatch(w http.ResponseWriter, r *http.Re
 		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_config", "Configuration validation failed", fieldErrors)
 		return
 	}
-	image, err := s.renderInstallation(r.Context(), device, app, updated)
+	image, messages, err := s.renderInstallation(r.Context(), device, app, updated)
 	if err != nil {
-		writeAPIError(w, http.StatusUnprocessableEntity, "render_failed", "Configuration could not be rendered", nil)
+		writeAPIError(w, http.StatusUnprocessableEntity, "render_failed", "Configuration could not be rendered: "+sanitizedRenderMessage(err.Error()), nil)
 		return
 	}
 	now := time.Now()
+	result, message, nextRenderAt := classifyRenderResult(now, image, messages, nil, app.UInterval)
+	mutationID := strings.TrimSpace(request.MutationID)
+	if mutationID == "" {
+		mutationID = newFrameRequestID()
+	}
+	if len(mutationID) > 64 {
+		mutationID = mutationID[:64]
+	}
+	previousVersion := device.StateVersion
+	device.StateVersion++
+	device.LastMutationID = mutationID
+	device.LastMutationResult = "configuration_updated"
 	contextApp := *app
 	contextApp.Config = updated
 	contextHash := renderContextHash(device, &contextApp)
@@ -886,13 +952,19 @@ func (s *Server) handleInstallationConfigPatch(w http.ResponseWriter, r *http.Re
 			Config: updated, LastRender: now,
 			EmptyLastRender:   len(image) == 0,
 			RenderContextHash: contextHash,
+			LastRenderResult:  result,
+			LastRenderMessage: message,
+			NextRenderAt:      nextRenderAt,
 		}
-		fields := []string{"Config", "LastRender", "EmptyLastRender", "RenderContextHash"}
+		fields := []string{"Config", "LastRender", "EmptyLastRender", "RenderContextHash", "LastRenderResult", "LastRenderMessage", "NextRenderAt"}
 		if len(image) > 0 {
 			update.LastSuccessfulRender = &now
 			fields = append(fields, "LastSuccessfulRender")
 		}
 		if err := tx.Model(&data.App{ID: app.ID}).Select(fields).Updates(update).Error; err != nil {
+			return err
+		}
+		if err := tx.Omit("Apps").Save(device).Error; err != nil {
 			return err
 		}
 		if len(image) > 0 {
@@ -905,9 +977,11 @@ func (s *Server) handleInstallationConfigPatch(w http.ResponseWriter, r *http.Re
 		return
 	}
 	app.Config, app.LastRender, app.EmptyLastRender, app.RenderContextHash = updated, now, len(image) == 0, contextHash
+	app.LastRenderResult, app.LastRenderMessage, app.NextRenderAt = result, message, nextRenderAt
 	if len(image) > 0 {
 		app.LastSuccessfulRender = &now
 	}
+	recordDeviceInvalidation(device, previousVersion, "app_configuration", mutationID)
 	s.notifyDashboard(GetUser(r).Username, WSEvent{Type: "apps_changed", DeviceID: device.ID})
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(s.installationConfigPayload(device, app, schema))
@@ -927,6 +1001,12 @@ func (s *Server) handleInstallationCreate(w http.ResponseWriter, r *http.Request
 	device, user := GetDevice(r), GetUser(r)
 	unlock := s.lockDevicePoll(device.ID)
 	defer unlock()
+	fresh, reloadErr := gorm.G[data.Device](s.DB).Preload("Apps", orderedAppsPreload).Where("id = ?", device.ID).First(r.Context())
+	if reloadErr != nil {
+		writeAPIError(w, http.StatusInternalServerError, "device_reload_failed", "Device state could not be refreshed", nil)
+		return
+	}
+	device = &fresh
 	var request installationCreateRequest
 	if !decodeAPIJSON(w, r, &request) {
 		return
@@ -1007,13 +1087,18 @@ func (s *Server) handleInstallationCreate(w http.ResponseWriter, r *http.Request
 		DeviceID: device.ID, Iname: iname, Name: item.ID, Path: &relativePath, Config: config,
 		Enabled: enabled, UInterval: request.RenderIntervalMin, DisplayTime: request.DisplayTimeSec,
 	}
-	image, err := s.renderInstallation(r.Context(), device, &app, config)
-	if err != nil {
-		writeAPIError(w, http.StatusUnprocessableEntity, "render_failed", "Initial configuration could not be rendered", nil)
-		return
-	}
 	now := time.Now()
+	previousVersion := device.StateVersion
+	device.StateVersion++
+	if mutationID == "" {
+		mutationID = newFrameRequestID()
+	}
+	device.LastMutationID = mutationID
+	device.LastMutationResult = "installation_created"
+	image, messages, renderErr := s.renderInstallation(r.Context(), device, &app, config)
+	result, renderMessage, nextRenderAt := classifyRenderResult(now, image, messages, renderErr, app.UInterval)
 	app.LastRender, app.EmptyLastRender = now, len(image) == 0
+	app.LastRenderResult, app.LastRenderMessage, app.NextRenderAt = result, renderMessage, nextRenderAt
 	app.RenderContextHash = renderContextHash(device, &app)
 	if len(image) > 0 {
 		app.LastSuccessfulRender = &now
@@ -1027,12 +1112,6 @@ func (s *Server) handleInstallationCreate(w http.ResponseWriter, r *http.Request
 		if err := gorm.G[data.App](tx).Create(r.Context(), &app); err != nil {
 			return err
 		}
-		device.StateVersion++
-		if mutationID == "" {
-			mutationID = newFrameRequestID()
-		}
-		device.LastMutationID = mutationID
-		device.LastMutationResult = "installation_created"
 		if err := tx.Omit("Apps").Save(device).Error; err != nil {
 			return err
 		}
@@ -1046,6 +1125,13 @@ func (s *Server) handleInstallationCreate(w http.ResponseWriter, r *http.Request
 		return
 	}
 	device.Apps = append(device.Apps, &app)
+	recordDeviceInvalidation(device, previousVersion, "installation_created", mutationID)
+	slog.Info("Installation mutation completed",
+		"request_id", r.Header.Get("X-Request-ID"), "device_id", device.ID, "app_id", item.ID,
+		"config_keys", configKeys, "validation_result", "valid", "http_status", http.StatusCreated,
+		"initial_render_result", result, "initial_render_message", renderMessage,
+		"rollback_result", "not_required", "final_installation_state", "installed", "mutation_id", mutationID,
+	)
 	s.notifyDashboard(user.Username, WSEvent{Type: "apps_changed", DeviceID: device.ID})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -1053,7 +1139,17 @@ func (s *Server) handleInstallationCreate(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) reorderInstallations(ctx context.Context, deviceID string, installationIDs []string) ([]*data.App, error) {
-	appsList, err := gorm.G[data.App](s.DB).Where("device_id = ?", deviceID).Find(ctx)
+	var ordered []*data.App
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		var reorderErr error
+		ordered, reorderErr = reorderInstallationsTx(ctx, tx, deviceID, installationIDs)
+		return reorderErr
+	})
+	return ordered, err
+}
+
+func reorderInstallationsTx(ctx context.Context, tx *gorm.DB, deviceID string, installationIDs []string) ([]*data.App, error) {
+	appsList, err := gorm.G[data.App](tx).Where("device_id = ?", deviceID).Find(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1089,31 +1185,62 @@ func (s *Server) reorderInstallations(ctx context.Context, deviceID string, inst
 		}
 		ordered = append(ordered, app)
 	}
-	err = s.DB.Transaction(func(tx *gorm.DB) error {
-		for order, app := range ordered {
-			if _, err := gorm.G[data.App](tx).Where("device_id = ? AND id = ?", deviceID, app.ID).Update(ctx, "order", order); err != nil {
-				return err
-			}
-			app.Order = order
+	for order, app := range ordered {
+		if _, err := gorm.G[data.App](tx).Where("device_id = ? AND id = ?", deviceID, app.ID).Update(ctx, "order", order); err != nil {
+			return nil, err
 		}
-		return nil
-	})
-	return ordered, err
+		app.Order = order
+	}
+	return ordered, nil
 }
 
 func (s *Server) handleInstallationOrderPatch(w http.ResponseWriter, r *http.Request) {
 	device := GetDevice(r)
+	unlock := s.lockDevicePoll(device.ID)
+	defer unlock()
+	fresh, err := gorm.G[data.Device](s.DB).Preload("Apps", orderedAppsPreload).Where("id = ?", device.ID).First(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "device_reload_failed", "Device state could not be refreshed", nil)
+		return
+	}
+	device = &fresh
 	var request struct {
-		InstallationIDs []string `json:"installationIDs"`
+		InstallationIDs      []string `json:"installationIDs"`
+		ExpectedStateVersion *uint64  `json:"expectedStateVersion"`
+		MutationID           string   `json:"mutationID"`
 	}
 	if !decodeAPIJSON(w, r, &request) {
 		return
 	}
-	ordered, err := s.reorderInstallations(r.Context(), device.ID, request.InstallationIDs)
-	if err != nil {
-		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_order", err.Error(), nil)
+	if request.ExpectedStateVersion != nil && *request.ExpectedStateVersion != device.StateVersion {
+		writeAPIError(w, http.StatusConflict, "stale_state", "Device state changed before this order was applied", nil)
 		return
 	}
+	mutationID := strings.TrimSpace(request.MutationID)
+	if mutationID == "" {
+		mutationID = newFrameRequestID()
+	}
+	previousVersion := device.StateVersion
+	device.StateVersion++
+	device.LastMutationID, device.LastMutationResult = mutationID, "installation_order_updated"
+	var ordered []*data.App
+	err = s.DB.Transaction(func(tx *gorm.DB) error {
+		var reorderErr error
+		ordered, reorderErr = reorderInstallationsTx(r.Context(), tx, device.ID, request.InstallationIDs)
+		if reorderErr != nil {
+			return reorderErr
+		}
+		return tx.Omit("Apps").Save(device).Error
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "installation") || strings.Contains(err.Error(), "duplicate") {
+			writeAPIError(w, http.StatusUnprocessableEntity, "invalid_order", err.Error(), nil)
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, "order_state_failed", "Installation order state could not be saved", nil)
+		return
+	}
+	recordDeviceInvalidation(device, previousVersion, "rotation_order", mutationID)
 	payloads := make([]AppPayload, 0, len(ordered))
 	for _, app := range ordered {
 		payloads = append(payloads, s.toAppPayload(device, app))

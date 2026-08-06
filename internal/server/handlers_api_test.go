@@ -1192,6 +1192,8 @@ func TestHandleDeleteInstallationAPI(t *testing.T) {
 	apiKey := "test_api_key"
 	deviceID := "testdevice"
 	installID := "deleteapp"
+	before, err := gorm.G[data.Device](s.DB).Where("id = ?", deviceID).First(context.Background())
+	require.NoError(t, err)
 
 	// Add a dummy app to the device
 	app := data.App{
@@ -1229,6 +1231,10 @@ func TestHandleDeleteInstallationAPI(t *testing.T) {
 	if _, err := gorm.G[data.App](s.DB).Where("device_id = ? AND iname = ?", deviceID, installID).First(context.Background()); err == nil {
 		t.Errorf("App was not deleted")
 	}
+	after, err := gorm.G[data.Device](s.DB).Where("id = ?", deviceID).First(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, before.StateVersion+1, after.StateVersion, "deletion invalidates only this device's rendered state")
+	assert.Equal(t, "installation_deleted", after.LastMutationResult)
 }
 
 func TestHandleDeleteInstallationAPI_ByInstallationID(t *testing.T) {

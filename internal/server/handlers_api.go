@@ -543,6 +543,10 @@ func (s *Server) handlePushApp(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusInternalServerError, "show_now_state_failed", "Show Now could not be queued safely", nil)
 			return
 		}
+		updatedDevice := *device
+		updatedDevice.StateVersion = updates.StateVersion
+		updatedDevice.LastMutationID = mutationID
+		recordDeviceInvalidation(&updatedDevice, device.StateVersion, "show_now", mutationID)
 		s.diagnosticsEvents.add(device.ID, "temporary_push_created", "Temporary Show Now frame created", installationID)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -821,6 +825,7 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	device = &fresh
+	previousVersion := device.StateVersion
 
 	var update DeviceUpdate
 	if !decodeAPIJSON(w, r, &update) {
@@ -961,6 +966,7 @@ func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to update device", http.StatusInternalServerError)
 		return
 	}
+	recordDeviceInvalidation(device, previousVersion, "device_settings", device.LastMutationID)
 	if locationChanged {
 		invalidated := 0
 		apps, err := gorm.G[data.App](s.DB).Where("device_id = ?", device.ID).Find(r.Context())
@@ -1042,6 +1048,7 @@ func (s *Server) handlePatchInstallation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	device = &fresh
+	previousVersion := device.StateVersion
 
 	app := device.GetApp(iname)
 	if app == nil || app.Pushed {
@@ -1206,6 +1213,7 @@ func (s *Server) handlePatchInstallation(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Failed to update app", http.StatusInternalServerError)
 		return
 	}
+	recordDeviceInvalidation(device, previousVersion, "installation_settings", mutationID)
 	if disabledActiveApp && !device.Sleeping {
 		if err := s.restoreDisplayAfterPowerOn(r.Context(), device); err != nil {
 			slog.Warn("Failed to advance display after disabling active app", "device", device.ID, "installation", app.Iname, "error", err)
@@ -1226,6 +1234,14 @@ func (s *Server) handleDeleteInstallationAPI(w http.ResponseWriter, r *http.Requ
 	installID := filepath.Base(r.PathValue("iname"))
 
 	device := GetDevice(r)
+	unlock := s.lockDevicePoll(device.ID)
+	defer unlock()
+	fresh, reloadErr := gorm.G[data.Device](s.DB).Preload("Apps", orderedAppsPreload).Where("id = ?", device.ID).First(r.Context())
+	if reloadErr != nil {
+		writeAPIError(w, http.StatusInternalServerError, "device_reload_failed", "Device state could not be refreshed", nil)
+		return
+	}
+	device = &fresh
 
 	// First try to find the app by iname (server-generated ID)
 	foundByPushedPath := false
@@ -1271,6 +1287,11 @@ func (s *Server) handleDeleteInstallationAPI(w http.ResponseWriter, r *http.Requ
 		device.NightModeApp = ""
 		deviceFields = append(deviceFields, "NightModeApp")
 	}
+	previousVersion := device.StateVersion
+	mutationID := newFrameRequestID()
+	device.StateVersion++
+	device.LastMutationID, device.LastMutationResult = mutationID, "installation_deleted"
+	deviceFields = append(deviceFields, "StateVersion", "LastMutationID", "LastMutationResult")
 	if err := s.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Delete(&data.App{}, app.ID).Error; err != nil {
 			return err
@@ -1278,18 +1299,22 @@ func (s *Server) handleDeleteInstallationAPI(w http.ResponseWriter, r *http.Requ
 		if len(deviceFields) == 0 {
 			return nil
 		}
-		_, err := gorm.G[data.Device](tx).Where("id = ?", device.ID).
-			Select("PinnedApp", "DisplayingApp", "DisplayRestoreApp", "NightModeApp").Updates(r.Context(), data.Device{
-			PinnedApp:         device.PinnedApp,
-			DisplayingApp:     device.DisplayingApp,
-			DisplayRestoreApp: device.DisplayRestoreApp,
-			NightModeApp:      device.NightModeApp,
-		})
+		err := tx.WithContext(r.Context()).Model(&data.Device{}).Where("id = ?", device.ID).
+			Select(deviceFields).Updates(data.Device{
+			PinnedApp:          device.PinnedApp,
+			DisplayingApp:      device.DisplayingApp,
+			DisplayRestoreApp:  device.DisplayRestoreApp,
+			NightModeApp:       device.NightModeApp,
+			StateVersion:       device.StateVersion,
+			LastMutationID:     device.LastMutationID,
+			LastMutationResult: device.LastMutationResult,
+		}).Error
 		return err
 	}); err != nil {
 		http.Error(w, "Failed to delete app", http.StatusInternalServerError)
 		return
 	}
+	recordDeviceInvalidation(device, previousVersion, "installation_deleted", mutationID)
 
 	// Clean up files using the actual iname
 	webpDir, err := s.ensureDeviceImageDir(device.ID)

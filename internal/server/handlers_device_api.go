@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"path/filepath"
 	"time"
@@ -229,7 +230,7 @@ func effectiveFrameDwell(now time.Time, configured int, app *data.App) int {
 	if app == nil || app.NextRenderAt == nil || !app.NextRenderAt.After(now) {
 		return configured
 	}
-	untilBoundary := int(app.NextRenderAt.Sub(now).Round(time.Second) / time.Second)
+	untilBoundary := int(math.Ceil(app.NextRenderAt.Sub(now).Seconds()))
 	if untilBoundary < 1 {
 		untilBoundary = 1
 	}

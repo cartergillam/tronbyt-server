@@ -188,8 +188,14 @@ func TestClockRenderDueAndBoundaryDwell(t *testing.T) {
 	assert.True(t, renderDue(boundary, app), "delayed or exact-boundary polling must invalidate the cached minute")
 	assert.True(t, renderDue(boundary.Add(2*time.Second), app), "a 12:35:02 delayed poll must render the current minute")
 	assert.Equal(t, 1, effectiveFrameDwell(boundary.Add(-750*time.Millisecond), 15, app))
+	assert.Equal(t, 15, effectiveFrameDwell(boundary.Add(-15*time.Second), 15, app), "12:34:45 uses the full 15-second cycle")
+	assert.Equal(t, 5, effectiveFrameDwell(boundary.Add(-5*time.Second), 15, app), "12:34:55 stops at 12:35:00")
+	assert.Equal(t, 1, effectiveFrameDwell(boundary.Add(-100*time.Millisecond), 15, app), "sub-second dwell rounds up instead of expiring early")
 	assert.Equal(t, 10, effectiveFrameDwell(boundary.Add(-10*time.Second), 15, app))
 	assert.Equal(t, 15, effectiveFrameDwell(boundary.Add(-30*time.Second), 15, app))
+	assert.Equal(t, 5, effectiveFrameDwell(boundary.Add(-5*time.Second), 90, app), "long configured dwell must stop at the minute boundary")
+	assert.Equal(t, 30, effectiveFrameDwell(boundary.Add(-30*time.Second), 90, app), "a cycle longer than one minute is capped at the boundary")
+	assert.Equal(t, 10, effectiveFrameDwell(boundary.Add(-30*time.Second), 10, app), "short configured dwell remains authoritative")
 }
 
 func TestClockRenderContextIncludesTimezoneConfigurationAndDST(t *testing.T) {
@@ -197,13 +203,29 @@ func TestClockRenderContextIncludesTimezoneConfigurationAndDST(t *testing.T) {
 	utc := "UTC"
 	path := "system-apps/apps/ogclock/og_clock.star"
 	app := &data.App{Path: &path, Config: data.JSONMap{"timezone_source": "device", "twenty_four_hour": false}}
-	device := &data.Device{Type: data.DeviceMatrixPortal, Timezone: &toronto}
-	torontoHash := renderContextHash(device, app)
+	device := &data.Device{ID: "display-a", Type: data.DeviceMatrixPortal, Timezone: &toronto, Brightness: 20}
+	visibleMinute := time.Date(2026, 11, 1, 5, 34, 59, 900_000_000, time.UTC)
+	torontoHash := renderContextHashAt(visibleMinute, device, app)
 	device.Timezone = &utc
-	assert.NotEqual(t, torontoHash, renderContextHash(device, app), "server timezone cannot substitute for device timezone")
+	assert.NotEqual(t, torontoHash, renderContextHashAt(visibleMinute, device, app), "server timezone cannot substitute for device timezone")
 	device.Timezone = &toronto
 	app.Config["twenty_four_hour"] = true
-	assert.NotEqual(t, torontoHash, renderContextHash(device, app), "configuration changes invalidate the frame cache")
+	assert.NotEqual(t, torontoHash, renderContextHashAt(visibleMinute, device, app), "configuration changes invalidate the frame cache")
+	app.Config["twenty_four_hour"] = false
+	assert.NotEqual(t, torontoHash, renderContextHashAt(visibleMinute.Add(100*time.Millisecond), device, app), "the exact local minute boundary invalidates a cached Clock frame")
+
+	secondDisplay := *device
+	secondDisplay.ID = "display-b"
+	assert.NotEqual(t, torontoHash, renderContextHashAt(visibleMinute, &secondDisplay, app), "render identities are scoped to one display")
+	secondDisplay = *device
+	secondDisplay.StateVersion++
+	assert.NotEqual(t, torontoHash, renderContextHashAt(visibleMinute, &secondDisplay, app), "a mutation invalidates only the affected device version")
+	secondDisplay = *device
+	secondDisplay.Brightness = 80
+	assert.NotEqual(t, torontoHash, renderContextHashAt(visibleMinute, &secondDisplay, app), "brightness-specific output state cannot share a render identity")
+	secondDisplay = *device
+	secondDisplay.LastAppIndex = 2
+	assert.NotEqual(t, torontoHash, renderContextHashAt(visibleMinute, &secondDisplay, app), "rotation state cannot share a render identity")
 
 	location, err := time.LoadLocation(toronto)
 	require.NoError(t, err)
@@ -220,6 +242,41 @@ func TestVisibleMinuteMarkerIsSanitizedMetadataOnly(t *testing.T) {
 	}
 	assert.Equal(t, "2026-07-31T19:07-04:00", markerValue(messages, visibleMinuteMarker))
 	assert.Equal(t, "2026-07-31T23:08:00Z", markerValue(messages, nextRenderMarker))
+}
+
+func TestDeviceMutationLocksSerializePerDisplayWithoutBlockingOtherDisplays(t *testing.T) {
+	s := &Server{}
+	unlockA := s.lockDevicePoll("display-a")
+
+	acquiredB := make(chan struct{})
+	go func() {
+		unlock := s.lockDevicePoll("display-b")
+		close(acquiredB)
+		unlock()
+	}()
+	select {
+	case <-acquiredB:
+	case <-time.After(time.Second):
+		t.Fatal("a mutation for display A blocked independent display B")
+	}
+
+	acquiredSecondA := make(chan struct{})
+	go func() {
+		unlock := s.lockDevicePoll("display-a")
+		close(acquiredSecondA)
+		unlock()
+	}()
+	select {
+	case <-acquiredSecondA:
+		t.Fatal("two operations for one display were allowed to overlap")
+	case <-time.After(20 * time.Millisecond):
+	}
+	unlockA()
+	select {
+	case <-acquiredSecondA:
+	case <-time.After(time.Second):
+		t.Fatal("the queued operation for display A did not resume")
+	}
 }
 
 func TestDeviceEventTimelineIsBoundedAndRecordsHealthTransitions(t *testing.T) {

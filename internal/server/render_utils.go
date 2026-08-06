@@ -335,11 +335,26 @@ const (
 )
 
 func renderContextHash(device *data.Device, app *data.App) string {
+	return renderContextHashAt(time.Now(), device, app)
+}
+
+func renderContextHashAt(now time.Time, device *data.Device, app *data.App) string {
 	context := map[string]any{
-		"config":     app.Config,
-		"timezone":   device.GetTimezone(),
-		"location":   device.Location,
-		"supports2x": device.Type.Supports2x(),
+		"deviceID":            device.ID,
+		"config":              app.Config,
+		"timezone":            device.GetTimezone(),
+		"location":            device.Location,
+		"supports2x":          device.Type.Supports2x(),
+		"stateVersion":        device.StateVersion,
+		"effectiveBrightness": device.GetEffectiveBrightness(),
+		"rotationIndex":       device.LastAppIndex,
+		"sleeping":            device.Sleeping,
+		"pinnedApp":           device.PinnedApp,
+		"activeShowNowApp":    device.ActiveShowNowApp,
+		"showNowRestoreApp":   device.ShowNowRestoreApp,
+	}
+	if isClockInstallation(app) {
+		context["visibleLocalMinute"] = now.In(deviceLocation(device)).Format("2006-01-02T15:04")
 	}
 	if device.Locale != nil {
 		context["locale"] = *device.Locale
@@ -350,6 +365,26 @@ func renderContextHash(device *data.Device, app *data.App) string {
 	}
 	sum := sha256.Sum256(encoded)
 	return fmt.Sprintf("%x", sum[:8])
+}
+
+func isClockInstallation(app *data.App) bool {
+	if app == nil {
+		return false
+	}
+	if strings.EqualFold(app.Name, "og-clock") {
+		return true
+	}
+	return app.Path != nil && strings.Contains(strings.ToLower(*app.Path), "/ogclock/")
+}
+
+func recordDeviceInvalidation(device *data.Device, previous uint64, reason, mutationID string) {
+	slog.Info("Device render state invalidated",
+		"device_id", device.ID,
+		"previous_version", previous,
+		"new_version", device.StateVersion,
+		"mutation_id", mutationID,
+		"invalidation_reason", reason,
+	)
 }
 
 func deviceLocation(device *data.Device) *time.Location {

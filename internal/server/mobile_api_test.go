@@ -378,6 +378,49 @@ func TestCatalogueListingFiltersAndPagination(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), `"repository":"custom-repository"`)
 }
 
+func TestCatalogueFindsOGClockByIDNameCategoryDetailAndInstalledState(t *testing.T) {
+	s := newTestServerAPI(t)
+	dir := filepath.Join(s.DataDir, "system-apps", "apps", "ogclock")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "og_clock.star"), []byte(`load("schema.star", "schema")
+def main(config):
+    return []
+def get_schema():
+    return schema.Schema(version = "1", fields = [])
+`), 0o644))
+	s.systemAppsCache = []apps.AppMetadata{{
+		Manifest: apps.Manifest{ID: "og-clock", Name: "OG Clock", FileName: "og_clock.star", Category: "clocks", Tags: []string{"time"}},
+		Path:     filepath.Join("system-apps", "apps", "ogclock"),
+	}}
+	require.NoError(t, gorm.G[data.App](s.DB).Create(context.Background(), &data.App{
+		DeviceID: "testdevice", Iname: "installed-clock", Name: "og-clock", Enabled: true,
+	}))
+
+	for name, target := range map[string]string{
+		"id search":      "/v0/catalogue?search=og-clock",
+		"name search":    "/v0/catalogue?search=OG%20Clock",
+		"category":       "/v0/catalogue?category=clocks",
+		"installed only": "/v0/catalogue?installed=true&deviceID=testdevice",
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := newAPIRequest(http.MethodGet, target, "device_api_key", nil)
+			rr := httptest.NewRecorder()
+			s.ServeHTTP(rr, req)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			assert.Contains(t, rr.Body.String(), `"id":"og-clock"`)
+			if name == "installed only" {
+				assert.Contains(t, rr.Body.String(), `"installed":true`)
+			}
+		})
+	}
+
+	req := newAPIRequest(http.MethodGet, "/v0/catalogue/og-clock", "device_api_key", nil)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"id":"og-clock"`)
+}
+
 func TestCatalogueIconCachingAndDecodeLimits(t *testing.T) {
 	s := newTestServerAPI(t)
 	dir := filepath.Join(s.DataDir, "system-apps", "apps", "icon-test")
@@ -536,7 +579,7 @@ func TestInstallationCreateRejectsInvalidAppAndForeignDevice(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 }
 
-func TestInstallationCreateRenderFailureDoesNotPersist(t *testing.T) {
+func TestInstallationCreatePersistsConfigurationWhenInitialPreviewFails(t *testing.T) {
 	s := newTestServerAPI(t)
 	dir := filepath.Join(s.DataDir, "system-apps", "apps", "broken-render")
 	require.NoError(t, os.MkdirAll(dir, 0755))
@@ -558,15 +601,86 @@ def get_schema():
 	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "device_api_key", body)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var response struct {
+		Installation AppPayload `json:"installation"`
+		Render       struct {
+			Status           string `json:"status"`
+			Message          string `json:"message"`
+			PreviewAvailable bool   `json:"previewAvailable"`
+		} `json:"render"`
+	}
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&response))
+	assert.Equal(t, "failure", response.Render.Status)
+	assert.False(t, response.Render.PreviewAvailable)
+	assert.NotEmpty(t, response.Render.Message)
 	count, err := gorm.G[data.App](s.DB).Where("device_id = ?", "testdevice").Count(context.Background(), "*")
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), count)
+	assert.Equal(t, int64(1), count)
+}
+
+func TestNWSDailyForecastCanadianLocationInstallsWithExplicitPreviewFailure(t *testing.T) {
+	s := newTestServerAPI(t)
+	dir := filepath.Join(s.DataDir, "system-apps", "apps", "nws_daily_forecast")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	source := `load("schema.star", "schema")
+def main(config):
+    fail("NWS Daily Forecast requires a U.S. location covered by an NWS forecast office")
+def get_schema():
+    return schema.Schema(version = "1", fields = [])
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "nws_daily_forecast.star"), []byte(source), 0o644))
+	s.systemAppsCache = []apps.AppMetadata{{
+		Manifest: apps.Manifest{ID: "nws-daily-forecast", Name: "NWS Daily Forecast", FileName: "nws_daily_forecast.star"},
+		Path:     filepath.Join("system-apps", "apps", "nws_daily_forecast"),
+	}}
+	var device data.Device
+	require.NoError(t, s.DB.First(&device, "id = ?", "testdevice").Error)
+	toronto := "America/Toronto"
+	device.Timezone = &toronto
+	device.Location = data.DeviceLocation{
+		Description: "Caledonia, ON, Canada", Locality: "Caledonia", Region: "Ontario", Country: "Canada",
+		Lat: 43.0738, Lng: -79.9519, Timezone: toronto,
+	}
+	require.NoError(t, s.DB.Omit("Apps").Save(&device).Error)
+
+	// Sanitized production-equivalent request: the app inherits the device's
+	// Caledonia coordinate and uses its default Fahrenheit setting.
+	body := []byte(`{"appID":"nws-daily-forecast","config":{},"enabled":true,"displayTimeSec":15,"renderIntervalMin":60,"mutationID":"nws-caledonia-001"}`)
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "device_api_key", body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var response struct {
+		Installation AppPayload `json:"installation"`
+		Render       struct {
+			Status           string `json:"status"`
+			Message          string `json:"message"`
+			PreviewAvailable bool   `json:"previewAvailable"`
+		} `json:"render"`
+	}
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&response))
+	assert.Equal(t, "failure", response.Render.Status)
+	assert.Contains(t, response.Render.Message, "requires a U.S. location")
+	assert.False(t, response.Render.PreviewAvailable)
+
+	req = newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations/"+response.Installation.ID+"/preview", "device_api_key", nil)
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusFailedDependency, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"code":"preview_network_unavailable"`)
+	assert.Contains(t, rr.Body.String(), "requires a U.S. location")
+
+	count, err := gorm.G[data.App](s.DB).Where("device_id = ? AND name = ?", "testdevice", "nws-daily-forecast").Count(context.Background(), "*")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count, "a preview failure must not create duplicate or rolled-back installations")
 }
 
 func TestInstallationOrderingValidationAndSuccess(t *testing.T) {
 	s := newTestServerAPI(t)
 	ctx := context.Background()
+	before, err := gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").First(ctx)
+	require.NoError(t, err)
 	for i, id := range []string{"100", "200", "300"} {
 		app := data.App{DeviceID: "testdevice", Iname: id, Name: id, Order: i, Enabled: i != 1}
 		require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &app))
@@ -599,6 +713,10 @@ func TestInstallationOrderingValidationAndSuccess(t *testing.T) {
 	require.Len(t, ordered, 3)
 	assert.Equal(t, []string{"300", "100", "200"}, []string{ordered[0].Iname, ordered[1].Iname, ordered[2].Iname})
 	assert.False(t, ordered[2].Enabled, fmt.Sprintf("disabled installation should remain disabled: %#v", ordered[2]))
+	after, err := gorm.G[data.Device](s.DB).Where("id = ?", "testdevice").First(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, before.StateVersion+1, after.StateVersion)
+	assert.Equal(t, "installation_order_updated", after.LastMutationResult)
 }
 
 func TestInstallationOrderingRejectsTemporaryPushedIDsButDoesNotRequireThem(t *testing.T) {
