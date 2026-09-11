@@ -365,10 +365,32 @@ func sortGames(games []Game) {
 }
 
 func newSportsSnapshot(timezone string, games []Game, next *Game, now time.Time) SportsSnapshot {
+	return newSportsSnapshotFor(LeagueNHL, ProviderNHLWeb, timezone, games, next, now)
+}
+
+func newSportsSnapshotFor(league LeagueID, provider ProviderID, timezone string, games []Game, next *Game, now time.Time) SportsSnapshot {
 	if games == nil {
 		games = []Game{}
 	}
-	return SportsSnapshot{League: LeagueNHL, Provider: ProviderNHLWeb, DeviceTimezone: timezone, Games: games, NextGame: next, FreshAsOf: now.UTC()}
+	snapshot := SportsSnapshot{League: league, Provider: provider, DeviceTimezone: timezone, Games: games, NextGame: next, FreshAsOf: now.UTC()}
+	addDeviceLocalTimes(&snapshot)
+	return snapshot
+}
+
+func addDeviceLocalTimes(snapshot *SportsSnapshot) {
+	location, err := time.LoadLocation(snapshot.DeviceTimezone)
+	if err != nil {
+		return
+	}
+	for index := range snapshot.Games {
+		snapshot.Games[index].ScheduledLocal = snapshot.Games[index].ScheduledAt.In(location).Format(time.RFC3339)
+	}
+	if snapshot.NextGame != nil {
+		snapshot.NextGame.ScheduledLocal = snapshot.NextGame.ScheduledAt.In(location).Format(time.RFC3339)
+	}
+	for index := range snapshot.UpcomingGames {
+		snapshot.UpcomingGames[index].ScheduledLocal = snapshot.UpcomingGames[index].ScheduledAt.In(location).Format(time.RFC3339)
+	}
 }
 
 func sportsCachePolicy(snapshot SportsSnapshot) CachePolicy {

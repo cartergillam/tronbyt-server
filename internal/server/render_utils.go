@@ -214,6 +214,34 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 		}
 		encoded, _ := json.Marshal(snapshot)
 		config["$sports_data"] = string(encoded)
+	case "nba-live":
+		if s.SportsProvider == nil {
+			setError(providers.SportsUnavailable())
+			return
+		}
+		timezone := device.GetTimezone()
+		mode, _ := config["mode"].(string)
+		teamID := providerTeamID(config["teamid"])
+		if mode == "all_live" {
+			snapshot, err := s.SportsProvider.LiveGames(ctx, providers.SportsLiveRequest{League: providers.LeagueNBA, Timezone: timezone})
+			if err != nil {
+				setError(err)
+				return
+			}
+			encoded, _ := json.Marshal(snapshot)
+			config["$sports_data"] = string(encoded)
+			return
+		}
+		if teamID == "" {
+			teamID = "28"
+		}
+		snapshot, err := s.SportsProvider.Schedule(ctx, providers.SportsScheduleRequest{League: providers.LeagueNBA, TeamID: teamID, Timezone: timezone})
+		if err != nil {
+			setError(err)
+			return
+		}
+		encoded, _ := json.Marshal(snapshot)
+		config["$sports_data"] = string(encoded)
 	}
 }
 

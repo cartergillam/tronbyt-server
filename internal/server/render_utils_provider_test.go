@@ -199,4 +199,32 @@ func TestManagedCFLErrorsRemainSanitized(t *testing.T) {
 	assert.JSONEq(t, `{"code":"sports_response_invalid","message":"CFL data could not be read"}`, config["$provider_error"].(string))
 }
 
+func TestManagedNBAModesUseStableTeamIDAndDeviceTimezone(t *testing.T) {
+	provider := &recordingSportsProvider{}
+	server := &Server{SportsProvider: provider}
+	device := &data.Device{Timezone: stringPointer("America/Toronto")}
+	config := map[string]any{"mode": "favorite", "teamid": "28"}
+	server.injectManagedProviderData(context.Background(), device, &data.App{Name: "nba-live"}, config)
+	require.Len(t, provider.scheduleRequests, 1)
+	assert.Equal(t, providers.LeagueNBA, provider.scheduleRequests[0].League)
+	assert.Equal(t, providers.ProviderTeamID("28"), provider.scheduleRequests[0].TeamID)
+	assert.Equal(t, "America/Toronto", provider.scheduleRequests[0].Timezone)
+	assert.Contains(t, config, "$sports_data")
+
+	provider = &recordingSportsProvider{}
+	config = map[string]any{"mode": "all_live", "teamid": "28"}
+	(&Server{SportsProvider: provider}).injectManagedProviderData(context.Background(), device, &data.App{Name: "nba-live"}, config)
+	require.Len(t, provider.liveRequests, 1)
+	assert.Equal(t, providers.LeagueNBA, provider.liveRequests[0].League)
+	assert.Empty(t, provider.scheduleRequests)
+}
+
+func TestManagedNBAErrorsRemainSanitized(t *testing.T) {
+	provider := &recordingSportsProvider{err: providers.SanitizedError{Code: "sports_response_invalid", Message: "NBA data could not be read", Retryable: true}}
+	config := map[string]any{"mode": "favorite", "teamid": "28"}
+	(&Server{SportsProvider: provider}).injectManagedProviderData(context.Background(), &data.Device{}, &data.App{Name: "nba-live"}, config)
+	assert.NotContains(t, config, "$sports_data")
+	assert.JSONEq(t, `{"code":"sports_response_invalid","message":"NBA data could not be read"}`, config["$provider_error"].(string))
+}
+
 func stringPointer(value string) *string { return &value }

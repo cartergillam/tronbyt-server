@@ -16,6 +16,7 @@ type GameID string
 const (
 	LeagueNHL      LeagueID   = "nhl"
 	LeagueCFL      LeagueID   = "cfl"
+	LeagueNBA      LeagueID   = "nba"
 	ProviderNHLWeb ProviderID = "nhl-web"
 	ProviderESPN   ProviderID = "espn-site"
 )
@@ -69,6 +70,7 @@ type Game struct {
 	AwayScore      int        `json:"awayScore"`
 	HomeScore      int        `json:"homeScore"`
 	ScheduledAt    time.Time  `json:"scheduledAt"`
+	ScheduledLocal string     `json:"scheduledLocal,omitempty"`
 	ProviderState  string     `json:"providerState"`
 	Status         GameStatus `json:"status"`
 	Period         int        `json:"period,omitempty"`

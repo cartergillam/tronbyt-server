@@ -49,5 +49,11 @@
     "candidate": true,
     "recommended": false,
     "compatibilityNotes": "Candidate using normalized server-managed NHL data; requires physical approval on a 64x32 display."
+  },
+  "nba-live": {
+    "verified": false,
+    "candidate": true,
+    "recommended": false,
+    "compatibilityNotes": "Candidate using normalized server-managed ESPN NBA data; requires physical approval on a 64x32 display."
   }
 }

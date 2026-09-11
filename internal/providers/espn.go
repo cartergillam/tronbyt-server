@@ -25,13 +25,15 @@ const (
 )
 
 // ESPNAdapter contains the small portion of ESPN's site-scoreboard response
-// needed by CFL Live. League paths and state translation remain replaceable;
-// normalized sports data is the only contract exposed to renderers.
+// shared by CFL and NBA. Endpoint routing and state translation remain
+// league-specific; normalized sports data is the only contract exposed to
+// renderers.
 type ESPNAdapter struct {
-	Client  *http.Client
-	BaseURL string
-	Cache   *Cache[SportsSnapshot]
-	Now     func() time.Time
+	Client     *http.Client
+	BaseURL    string
+	NBABaseURL string
+	Cache      *Cache[SportsSnapshot]
+	Now        func() time.Time
 }
 
 func NewESPNAdapter(client *http.Client) *ESPNAdapter {
@@ -39,17 +41,25 @@ func NewESPNAdapter(client *http.Client) *ESPNAdapter {
 		client = &http.Client{Timeout: 8 * time.Second}
 	}
 	return &ESPNAdapter{
-		Client: client, BaseURL: "https://site.api.espn.com/apis/site/v2/sports/football/cfl/scoreboard",
-		Cache: NewCache[SportsSnapshot](espnMinimumFetchPeriod), Now: time.Now,
+		Client:     client,
+		BaseURL:    "https://site.api.espn.com/apis/site/v2/sports/football/cfl/scoreboard",
+		NBABaseURL: "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
+		Cache:      NewCache[SportsSnapshot](espnMinimumFetchPeriod), Now: time.Now,
 	}
 }
 
 func (adapter *ESPNAdapter) Teams(_ context.Context, league LeagueID) ([]Team, error) {
-	if league != LeagueCFL {
+	var catalog map[ProviderTeamID]Team
+	switch league {
+	case LeagueCFL:
+		catalog = cflTeams
+	case LeagueNBA:
+		catalog = nbaTeams
+	default:
 		return nil, errorsForUnsupportedLeague()
 	}
-	teams := make([]Team, 0, len(cflTeams))
-	for _, team := range cflTeams {
+	teams := make([]Team, 0, len(catalog))
+	for _, team := range catalog {
 		teams = append(teams, team)
 	}
 	sort.Slice(teams, func(i, j int) bool { return teams[i].DisplayName < teams[j].DisplayName })
@@ -59,6 +69,9 @@ func (adapter *ESPNAdapter) Teams(_ context.Context, league LeagueID) ([]Team, e
 func (adapter *ESPNAdapter) Schedule(ctx context.Context, request SportsScheduleRequest) (SportsSnapshot, error) {
 	if err := request.Validate(); err != nil {
 		return SportsSnapshot{}, err
+	}
+	if request.League == LeagueNBA {
+		return adapter.scheduleNBA(ctx, request)
 	}
 	if request.League != LeagueCFL {
 		return SportsSnapshot{}, errorsForUnsupportedLeague()
@@ -96,8 +109,9 @@ func (adapter *ESPNAdapter) Schedule(ctx context.Context, request SportsSchedule
 		} else {
 			next = selectNextTeamGame(games, request.TeamID, currentNow)
 		}
-		result := newSportsSnapshot(request.Timezone, selected, next, currentNow)
+		result := newSportsSnapshotFor(request.League, ProviderESPN, request.Timezone, selected, next, currentNow)
 		result.UpcomingGames = upcoming
+		addDeviceLocalTimes(&result)
 		return result, espnCachePolicy(result), nil
 	})
 	if err != nil {
@@ -109,6 +123,9 @@ func (adapter *ESPNAdapter) Schedule(ctx context.Context, request SportsSchedule
 func (adapter *ESPNAdapter) LiveGames(ctx context.Context, request SportsLiveRequest) (SportsSnapshot, error) {
 	if err := request.Validate(); err != nil {
 		return SportsSnapshot{}, err
+	}
+	if request.League == LeagueNBA {
+		return adapter.liveNBAGames(ctx, request)
 	}
 	if request.League != LeagueCFL {
 		return SportsSnapshot{}, errorsForUnsupportedLeague()
@@ -133,7 +150,7 @@ func (adapter *ESPNAdapter) LiveGames(ctx context.Context, request SportsLiveReq
 			}
 		}
 		sortGames(live)
-		result := newSportsSnapshot(request.Timezone, live, selectNextGame(games, currentNow), currentNow)
+		result := newSportsSnapshotFor(request.League, ProviderESPN, request.Timezone, live, selectNextGame(games, currentNow), currentNow)
 		return result, espnCachePolicy(result), nil
 	})
 	if err != nil {
@@ -192,7 +209,24 @@ type espnEventPayload struct {
 }
 
 func (adapter *ESPNAdapter) fetchCFLGames(ctx context.Context, from, through time.Time) ([]Game, error) {
-	endpoint, err := url.Parse(adapter.BaseURL)
+	payload, err := adapter.fetchESPNEvents(ctx, adapter.BaseURL, from, through, "CFL")
+	if err != nil {
+		return nil, err
+	}
+	fetchedAt := adapter.now().UTC()
+	games := make([]Game, 0, len(payload))
+	for _, raw := range payload {
+		game, ok := normalizeCFLGame(raw, fetchedAt)
+		if ok {
+			games = append(games, game)
+		}
+	}
+	sortGames(games)
+	return games, nil
+}
+
+func (adapter *ESPNAdapter) fetchESPNEvents(ctx context.Context, baseURL string, from, through time.Time, leagueName string) ([]espnEventPayload, error) {
+	endpoint, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, SportsUnavailable()
 	}
@@ -220,18 +254,9 @@ func (adapter *ESPNAdapter) fetchCFLGames(ctx context.Context, from, through tim
 		Events []espnEventPayload `json:"events"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, SanitizedError{Code: "sports_response_invalid", Message: "CFL data could not be read", Retryable: true}
+		return nil, SanitizedError{Code: "sports_response_invalid", Message: leagueName + " data could not be read", Retryable: true}
 	}
-	fetchedAt := adapter.now().UTC()
-	games := make([]Game, 0, len(payload.Events))
-	for _, raw := range payload.Events {
-		game, ok := normalizeCFLGame(raw, fetchedAt)
-		if ok {
-			games = append(games, game)
-		}
-	}
-	sortGames(games)
-	return games, nil
+	return payload.Events, nil
 }
 
 func normalizeCFLGame(raw espnEventPayload, fetchedAt time.Time) (Game, bool) {
