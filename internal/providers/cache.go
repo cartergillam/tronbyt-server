@@ -35,6 +35,16 @@ func NewCache[T any](minimumInterval time.Duration) *Cache[T] {
 }
 
 func (cache *Cache[T]) Get(ctx context.Context, key string, ttl, staleTTL time.Duration, fetch func(context.Context) (T, error)) (T, bool, error) {
+	return cache.GetWithTTL(ctx, key, staleTTL, func(ctx context.Context) (T, time.Duration, error) {
+		value, err := fetch(ctx)
+		return value, ttl, err
+	})
+}
+
+// GetWithTTL is Get with a provider-selected freshness lifetime. This lets a
+// response such as a closed-market quote remain fresh longer without creating
+// a separate cache or bypassing request coalescing.
+func (cache *Cache[T]) GetWithTTL(ctx context.Context, key string, staleTTL time.Duration, fetch func(context.Context) (T, time.Duration, error)) (T, bool, error) {
 	cache.mu.Lock()
 	now := time.Now()
 	entry, found := cache.entries[key]
@@ -65,9 +75,9 @@ func (cache *Cache[T]) Get(ctx context.Context, key string, ttl, staleTTL time.D
 	cache.inflight[key] = call
 	cache.mu.Unlock()
 
-	value, err := fetch(ctx)
+	value, ttl, err := fetch(ctx)
 	if err != nil {
-		if found && now.Before(entry.staleUntil) {
+		if found && time.Now().Before(entry.staleUntil) {
 			cache.finish(key, call, entry.value, true, nil)
 			return entry.value, true, nil
 		}
@@ -75,8 +85,12 @@ func (cache *Cache[T]) Get(ctx context.Context, key string, ttl, staleTTL time.D
 		cache.finish(key, call, zero, false, err)
 		return zero, false, err
 	}
+	if ttl <= 0 {
+		ttl = time.Minute
+	}
+	storedAt := time.Now()
 	cache.mu.Lock()
-	cache.entries[key] = cacheEntry[T]{value: value, freshUntil: now.Add(ttl), staleUntil: now.Add(ttl + staleTTL)}
+	cache.entries[key] = cacheEntry[T]{value: value, freshUntil: storedAt.Add(ttl), staleUntil: storedAt.Add(ttl + staleTTL)}
 	call.value = value
 	close(call.done)
 	delete(cache.inflight, key)

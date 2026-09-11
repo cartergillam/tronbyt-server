@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -16,7 +17,10 @@ type recordingMarketProvider struct{ requests []providers.MarketRequest }
 
 func (provider *recordingMarketProvider) Quotes(_ context.Context, request providers.MarketRequest) ([]providers.MarketQuote, error) {
 	provider.requests = append(provider.requests, request)
-	return []providers.MarketQuote{{Symbol: request.Symbols[0], Price: 42, QuoteTimestamp: time.Unix(1, 0)}}, nil
+	return []providers.MarketQuote{{
+		Symbol: request.Symbols[0], Price: 42, QuoteTimestamp: time.Unix(1, 0), ProviderUpdated: time.Unix(1, 0),
+		Exchange: "NASDAQ", MIC: "XNAS", Currency: "USD", MarketStatus: providers.MarketOpen,
+	}}, nil
 }
 
 type recordingWeatherProvider struct{ requests []providers.WeatherRequest }
@@ -44,6 +48,34 @@ func TestManagedMarketDataUsesOwnerScopeAndKeepsDevicesOutOfSharedInputs(t *test
 	assert.Equal(t, "server_owner", provider.requests[0].ScopeType)
 	assert.Equal(t, "owner", provider.requests[0].ScopeID)
 	assert.NotEqual(t, "display-a", provider.requests[0].CredentialID)
+}
+
+func TestManagedMarketDataPreservesQuoteMetadataAndReportsInvalidSymbols(t *testing.T) {
+	provider := &recordingMarketProvider{}
+	server := &Server{MarketProvider: provider}
+	device := &data.Device{ID: "display-a", Username: "owner"}
+	config := map[string]any{"credential_id": "markets", "symbols": " shop:tsx, AAPL "}
+	server.injectManagedProviderData(context.Background(), device, &data.App{Name: "market-watch"}, config)
+	require.Len(t, provider.requests, 1)
+	assert.Equal(t, []string{"SHOP:TSX", "AAPL"}, provider.requests[0].Symbols)
+
+	var quotes []providers.MarketQuote
+	require.NoError(t, json.Unmarshal([]byte(config["$provider_data"].(string)), &quotes))
+	require.Len(t, quotes, 1)
+	assert.Equal(t, "NASDAQ", quotes[0].Exchange)
+	assert.Equal(t, "XNAS", quotes[0].MIC)
+	assert.Equal(t, "USD", quotes[0].Currency)
+	assert.Equal(t, providers.MarketOpen, quotes[0].MarketStatus)
+	assert.False(t, quotes[0].ProviderUpdated.IsZero())
+	assert.NotContains(t, config["$provider_data"].(string), "secret")
+
+	config = map[string]any{"credential_id": "markets", "symbols": "not a symbol"}
+	server.injectManagedProviderData(context.Background(), device, &data.App{Name: "market-watch"}, config)
+	// The recording provider is intentionally permissive. Production validation
+	// happens in the provider adapter; this verifies raw input is not silently
+	// dropped before it can produce its sanitized invalid_symbol response.
+	require.Len(t, provider.requests, 2)
+	assert.Equal(t, []string{"not a symbol"}, provider.requests[1].Symbols)
 }
 
 func TestManagedWeatherDataInheritsDeviceLocationAndIsolatesCustomOverride(t *testing.T) {

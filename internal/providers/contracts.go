@@ -24,11 +24,17 @@ type MarketQuote struct {
 	Price            float64      `json:"price"`
 	AbsoluteChange   float64      `json:"absoluteChange"`
 	PercentageChange float64      `json:"percentageChange"`
+	Exchange         string       `json:"exchange,omitempty"`
+	MIC              string       `json:"mic,omitempty"`
+	Currency         string       `json:"currency,omitempty"`
 	MarketStatus     MarketStatus `json:"marketStatus"`
-	LogoAssetURL     string       `json:"logoAssetURL,omitempty"`
 	QuoteTimestamp   time.Time    `json:"quoteTimestamp"`
 	ProviderUpdated  time.Time    `json:"providerUpdated"`
-	Stale            bool         `json:"stale"`
+	// Delayed is set only when Twelve Data explicitly identifies the quote as
+	// end-of-day or delayed. It is distinct from Stale, which means the server
+	// is showing a bounded last-known-good response after a failed refresh.
+	Delayed bool `json:"delayed"`
+	Stale   bool `json:"stale"`
 }
 
 type MarketRequest struct {
@@ -49,20 +55,24 @@ func NormalizeMarketSymbol(value string) (string, error) {
 }
 
 func (request MarketRequest) Validate() error {
-	if len(request.Symbols) == 0 || len(request.Symbols) > 10 {
-		return errors.New("market request must contain between 1 and 10 symbols")
+	if len(request.Symbols) == 0 || len(request.Symbols) > MaxMarketSymbols {
+		return SanitizedError{Code: "market_symbol_limit", Message: "Choose between 1 and 5 market symbols", Retryable: false}
 	}
 	seen := map[string]bool{}
 	for _, symbol := range request.Symbols {
 		var err error
 		symbol, err = NormalizeMarketSymbol(symbol)
 		if err != nil || seen[symbol] {
-			return errors.New("market symbols must be unique and valid")
+			return SanitizedError{Code: "invalid_symbol", Message: "A market symbol is not available", Retryable: false}
 		}
 		seen[symbol] = true
 	}
 	return nil
 }
+
+// MaxMarketSymbols keeps the default five-minute open-market refresh within a
+// Twelve Data Basic-plan daily credit budget for a personal display.
+const MaxMarketSymbols = 5
 
 type MarketProvider interface {
 	Quotes(context.Context, MarketRequest) ([]MarketQuote, error)

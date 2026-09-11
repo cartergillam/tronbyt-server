@@ -3,19 +3,30 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
+const (
+	marketOpenFreshTTL     = 5 * time.Minute
+	marketClosedFreshTTL   = 45 * time.Minute
+	marketStaleTTL         = 30 * time.Minute
+	marketRateLimitBackoff = 15 * time.Minute
+)
+
 type TwelveDataAdapter struct {
-	Credentials CredentialResolver
-	Client      *http.Client
-	BaseURL     string
-	Cache       *Cache[[]MarketQuote]
+	Credentials  CredentialResolver
+	Client       *http.Client
+	BaseURL      string
+	Cache        *Cache[[]MarketQuote]
+	backoffMu    sync.Mutex
+	backoffUntil map[string]time.Time
 }
 
 func NewTwelveDataAdapter(credentials CredentialResolver, client *http.Client) *TwelveDataAdapter {
@@ -24,7 +35,10 @@ func NewTwelveDataAdapter(credentials CredentialResolver, client *http.Client) *
 	}
 	return &TwelveDataAdapter{
 		Credentials: credentials, Client: client, BaseURL: "https://api.twelvedata.com",
-		Cache: NewCache[[]MarketQuote](time.Second),
+		// Five minutes prevents a device polling every few seconds from spending
+		// a Basic-plan quote credit on every render after an upstream failure.
+		Cache:        NewCache[[]MarketQuote](marketOpenFreshTTL),
+		backoffUntil: make(map[string]time.Time),
 	}
 }
 
@@ -37,31 +51,69 @@ func (adapter *TwelveDataAdapter) Quotes(ctx context.Context, request MarketRequ
 		value, _ := NormalizeMarketSymbol(symbol)
 		normalized = append(normalized, value)
 	}
-	key := request.ScopeType + ":" + request.ScopeID + ":" + strings.Join(normalized, ",")
-	quotes, stale, err := adapter.Cache.Get(ctx, key, 60*time.Second, 30*time.Minute, func(ctx context.Context) ([]MarketQuote, error) {
+	key := request.ScopeType + ":" + request.ScopeID + ":" + request.CredentialID + ":" + strings.Join(normalized, ",")
+	backoffKey := request.ScopeType + ":" + request.ScopeID + ":" + request.CredentialID
+	quotes, stale, err := adapter.Cache.GetWithTTL(ctx, key, marketStaleTTL, func(ctx context.Context) ([]MarketQuote, time.Duration, error) {
+		if adapter.rateLimited(backoffKey) {
+			return nil, 0, SanitizedError{Code: "provider_rate_limited", Message: "Market data is temporarily rate limited", Retryable: true}
+		}
 		secret, err := adapter.Credentials.Resolve(ctx, request.CredentialID, request.ScopeType, request.ScopeID)
 		if err != nil {
-			return nil, MissingCredential("Market data")
+			return nil, 0, MissingCredential("Market data")
 		}
 		result := make([]MarketQuote, 0, len(normalized))
 		for _, symbol := range normalized {
 			quote, err := adapter.fetchQuote(ctx, symbol, secret)
 			if err != nil {
-				return nil, err
+				adapter.recordBackoff(backoffKey, err)
+				return nil, 0, err
 			}
 			result = append(result, quote)
 		}
-		return result, nil
+		return result, quoteFreshTTL(result), nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	// The cached slice is shared. Copy it before annotating a stale fallback so
+	// a later fresh request can never inherit the stale marker.
+	quotes = append([]MarketQuote(nil), quotes...)
 	if stale {
 		for index := range quotes {
 			quotes[index].Stale = true
 		}
 	}
 	return quotes, nil
+}
+
+func quoteFreshTTL(quotes []MarketQuote) time.Duration {
+	for _, quote := range quotes {
+		if quote.MarketStatus == MarketOpen {
+			return marketOpenFreshTTL
+		}
+	}
+	return marketClosedFreshTTL
+}
+
+func (adapter *TwelveDataAdapter) rateLimited(key string) bool {
+	adapter.backoffMu.Lock()
+	defer adapter.backoffMu.Unlock()
+	until := adapter.backoffUntil[key]
+	if time.Now().Before(until) {
+		return true
+	}
+	delete(adapter.backoffUntil, key)
+	return false
+}
+
+func (adapter *TwelveDataAdapter) recordBackoff(key string, err error) {
+	var sanitized SanitizedError
+	if !errors.As(err, &sanitized) || sanitized.Code != "provider_rate_limited" {
+		return
+	}
+	adapter.backoffMu.Lock()
+	adapter.backoffUntil[key] = time.Now().Add(marketRateLimitBackoff)
+	adapter.backoffMu.Unlock()
 }
 
 func (adapter *TwelveDataAdapter) ValidateCredential(ctx context.Context, id, scopeType, scopeID string) error {
@@ -100,12 +152,17 @@ func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret
 	var payload struct {
 		Symbol        string `json:"symbol"`
 		Name          string `json:"name"`
+		Exchange      string `json:"exchange"`
+		MIC           string `json:"mic"`
+		Currency      string `json:"currency"`
 		Close         string `json:"close"`
 		Change        string `json:"change"`
 		PercentChange string `json:"percent_change"`
 		Timestamp     int64  `json:"timestamp"`
 		LastUpdateAt  int64  `json:"last_update_at"`
 		MarketOpen    bool   `json:"is_market_open"`
+		IsEOD         bool   `json:"is_eod"`
+		IsDelayed     bool   `json:"is_delayed"`
 		Status        string `json:"status"`
 		Code          int    `json:"code"`
 		Message       string `json:"message"`
@@ -126,15 +183,28 @@ func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret
 	if timestamp == 0 {
 		timestamp = payload.Timestamp
 	}
+	if timestamp <= 0 {
+		return MarketQuote{}, SanitizedError{Code: "provider_response_invalid", Message: "Market data could not be read", Retryable: true}
+	}
 	updated := time.Unix(timestamp, 0).UTC()
 	status := MarketClosed
 	if payload.MarketOpen {
 		status = MarketOpen
 	}
+	responseSymbol, normalizeErr := NormalizeMarketSymbol(payload.Symbol)
+	if normalizeErr != nil {
+		responseSymbol = symbol
+	}
+	// Twelve Data may return an unqualified symbol even when the request used
+	// an exchange suffix. Preserve the configured stable display symbol.
+	if strings.Contains(symbol, ":") && !strings.Contains(responseSymbol, ":") {
+		responseSymbol = symbol
+	}
 	return MarketQuote{
-		Symbol: payload.Symbol, DisplayName: payload.Name, Price: price, AbsoluteChange: change,
-		PercentageChange: percentage, MarketStatus: status, QuoteTimestamp: updated,
-		ProviderUpdated: updated,
+		Symbol: responseSymbol, DisplayName: payload.Name, Price: price, AbsoluteChange: change,
+		PercentageChange: percentage, Exchange: payload.Exchange, MIC: payload.MIC, Currency: payload.Currency,
+		MarketStatus: status, QuoteTimestamp: updated, ProviderUpdated: updated,
+		Delayed: payload.IsEOD || payload.IsDelayed,
 	}, nil
 }
 

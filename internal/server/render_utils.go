@@ -170,11 +170,17 @@ func providerSymbols(value any) []string {
 	result := make([]string, 0, len(values))
 	seen := make(map[string]bool, len(values))
 	for _, value := range values {
-		if symbol, err := providers.NormalizeMarketSymbol(value); err == nil {
-			if seen[symbol] {
+		if symbol := strings.TrimSpace(value); symbol != "" {
+			if normalized, err := providers.NormalizeMarketSymbol(symbol); err == nil {
+				if seen[normalized] {
+					continue
+				}
+				seen[normalized] = true
+				result = append(result, normalized)
 				continue
 			}
-			seen[symbol] = true
+			// Keep malformed input for the provider contract, which returns a
+			// sanitized invalid_symbol response instead of silently ignoring it.
 			result = append(result, symbol)
 		}
 	}

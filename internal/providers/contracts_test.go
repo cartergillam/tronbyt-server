@@ -17,10 +17,11 @@ import (
 )
 
 func TestMarketContractLimitsSymbols(t *testing.T) {
-	assert.NoError(t, (MarketRequest{Symbols: []string{"AAPL", "TSX:RY"}}).Validate())
+	assert.NoError(t, (MarketRequest{Symbols: []string{"AAPL", "RY:TSX"}}).Validate())
 	assert.Error(t, (MarketRequest{Symbols: nil}).Validate())
 	assert.Error(t, (MarketRequest{Symbols: []string{"AAPL", "aapl"}}).Validate())
-	assert.Error(t, (MarketRequest{Symbols: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"}}).Validate())
+	assert.NoError(t, (MarketRequest{Symbols: []string{"1", "2", "3", "4", "5"}}).Validate())
+	assert.Error(t, (MarketRequest{Symbols: []string{"1", "2", "3", "4", "5", "6"}}).Validate())
 }
 
 func TestProviderCacheSharesFreshDataAndPreservesStaleData(t *testing.T) {
@@ -107,17 +108,125 @@ func TestTwelveDataAdapterNormalizesCachesAndRedactsCredential(t *testing.T) {
 		return jsonResponse(http.StatusOK, map[string]any{
 			"symbol": symbol, "name": symbol + " Inc", "close": "101.25", "change": "1.25",
 			"percent_change": "1.25", "timestamp": 1786028400, "is_market_open": true,
+			"exchange": "NASDAQ", "mic": "XNAS", "currency": "USD",
 		}), nil
 	})}
 	adapter := NewTwelveDataAdapter(fakeResolver{secret: "test-secret"}, client)
-	request := MarketRequest{Symbols: []string{"shop:tsx"}, CredentialID: "market-primary", ScopeType: "server_owner", ScopeID: "owner"}
+	request := MarketRequest{Symbols: []string{"shop:tsx", "AAPL"}, CredentialID: "market-primary", ScopeType: "server_owner", ScopeID: "owner"}
 	first, err := adapter.Quotes(t.Context(), request)
 	require.NoError(t, err)
 	second, err := adapter.Quotes(t.Context(), request)
 	require.NoError(t, err)
+	require.Len(t, first, 2)
 	assert.Equal(t, "SHOP:TSX", first[0].Symbol)
+	assert.Equal(t, "AAPL", first[1].Symbol)
+	assert.Equal(t, "NASDAQ", first[0].Exchange)
+	assert.Equal(t, "XNAS", first[0].MIC)
+	assert.Equal(t, "USD", first[0].Currency)
+	assert.Equal(t, MarketOpen, first[0].MarketStatus)
+	assert.False(t, first[0].Delayed)
 	assert.Equal(t, first, second)
+	assert.Equal(t, int32(2), calls.Load())
+}
+
+func TestTwelveDataAdapterReportsMissingCredentialWithoutRequestingProvider(t *testing.T) {
+	var calls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return jsonResponse(http.StatusOK, map[string]any{}), nil
+	})}
+	adapter := NewTwelveDataAdapter(fakeResolver{}, client)
+	_, err := adapter.Quotes(t.Context(), MarketRequest{Symbols: []string{"AAPL"}, CredentialID: "market-primary", ScopeType: "server_owner", ScopeID: "owner"})
+	var sanitized SanitizedError
+	require.ErrorAs(t, err, &sanitized)
+	assert.Equal(t, "provider_credential_missing", sanitized.Code)
+	assert.Equal(t, int32(0), calls.Load())
+}
+
+func TestTwelveDataAdapterUsesClosedMarketTTLAndExplicitEODStatus(t *testing.T) {
+	var calls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return jsonResponse(http.StatusOK, map[string]any{
+			"symbol": request.URL.Query().Get("symbol"), "name": "Shopify", "close": "156.32", "change": "-1.84",
+			"percent_change": "-1.16", "timestamp": 1786028400, "is_market_open": false, "is_eod": true,
+			"exchange": "Toronto Stock Exchange", "mic": "XTSE", "currency": "CAD",
+		}), nil
+	})}
+	adapter := NewTwelveDataAdapter(fakeResolver{secret: "test-secret"}, client)
+	request := MarketRequest{Symbols: []string{"shop:tsx"}, CredentialID: "market-primary", ScopeType: "server_owner", ScopeID: "owner"}
+	quotes, err := adapter.Quotes(t.Context(), request)
+	require.NoError(t, err)
+	require.Len(t, quotes, 1)
+	assert.Equal(t, "SHOP:TSX", quotes[0].Symbol)
+	assert.Equal(t, MarketClosed, quotes[0].MarketStatus)
+	assert.True(t, quotes[0].Delayed)
+	assert.Equal(t, "XTSE", quotes[0].MIC)
+
+	key := "server_owner:owner:market-primary:SHOP:TSX"
+	adapter.Cache.mu.Lock()
+	entry := adapter.Cache.entries[key]
+	adapter.Cache.mu.Unlock()
+	assert.WithinDuration(t, time.Now().Add(marketClosedFreshTTL), entry.freshUntil, time.Second)
 	assert.Equal(t, int32(1), calls.Load())
+}
+
+func TestTwelveDataAdapterMarksBoundedFallbackStaleWithoutMutatingCache(t *testing.T) {
+	failed := atomic.Bool{}
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if failed.Load() {
+			return nil, errors.New("provider unavailable")
+		}
+		return jsonResponse(http.StatusOK, map[string]any{
+			"symbol": request.URL.Query().Get("symbol"), "name": "Apple", "close": "100", "change": "1",
+			"percent_change": "1", "timestamp": 1786028400, "is_market_open": true,
+		}), nil
+	})}
+	adapter := NewTwelveDataAdapter(fakeResolver{secret: "test-secret"}, client)
+	request := MarketRequest{Symbols: []string{"AAPL"}, CredentialID: "market-primary", ScopeType: "server_owner", ScopeID: "owner"}
+	first, err := adapter.Quotes(t.Context(), request)
+	require.NoError(t, err)
+	assert.False(t, first[0].Stale)
+
+	key := "server_owner:owner:market-primary:AAPL"
+	adapter.Cache.mu.Lock()
+	entry := adapter.Cache.entries[key]
+	entry.freshUntil = time.Now().Add(-time.Second)
+	adapter.Cache.entries[key] = entry
+	adapter.Cache.lastRun[key] = time.Time{}
+	adapter.Cache.mu.Unlock()
+	failed.Store(true)
+	stale, err := adapter.Quotes(t.Context(), request)
+	require.NoError(t, err)
+	assert.True(t, stale[0].Stale)
+
+	adapter.Cache.mu.Lock()
+	entry = adapter.Cache.entries[key]
+	entry.freshUntil = time.Now().Add(time.Minute)
+	adapter.Cache.entries[key] = entry
+	adapter.Cache.mu.Unlock()
+	fresh, err := adapter.Quotes(t.Context(), request)
+	require.NoError(t, err)
+	assert.False(t, fresh[0].Stale)
+}
+
+func TestTwelveDataAdapterBacksOffAcrossWatchlistsAfterRateLimit(t *testing.T) {
+	var calls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return jsonResponse(http.StatusTooManyRequests, map[string]any{}), nil
+	})}
+	adapter := NewTwelveDataAdapter(fakeResolver{secret: "test-secret"}, client)
+	request := MarketRequest{Symbols: []string{"AAPL"}, CredentialID: "market-primary", ScopeType: "server_owner", ScopeID: "owner"}
+	_, err := adapter.Quotes(t.Context(), request)
+	var sanitized SanitizedError
+	require.ErrorAs(t, err, &sanitized)
+	assert.Equal(t, "provider_rate_limited", sanitized.Code)
+
+	_, err = adapter.Quotes(t.Context(), MarketRequest{Symbols: []string{"MSFT"}, CredentialID: "market-primary", ScopeType: "server_owner", ScopeID: "owner"})
+	require.ErrorAs(t, err, &sanitized)
+	assert.Equal(t, "provider_rate_limited", sanitized.Code)
+	assert.Equal(t, int32(1), calls.Load(), "a second watchlist must honor the credential-level backoff")
 }
 
 func TestOpenWeatherAdapterMapsNoAlertsAndUsesStaleCache(t *testing.T) {
