@@ -18,8 +18,10 @@ const (
 	LeagueCFL      LeagueID   = "cfl"
 	LeagueNBA      LeagueID   = "nba"
 	LeagueNFL      LeagueID   = "nfl"
+	LeagueMLB      LeagueID   = "mlb"
 	ProviderNHLWeb ProviderID = "nhl-web"
 	ProviderESPN   ProviderID = "espn-site"
+	ProviderMLB    ProviderID = "mlb-stats-api"
 )
 
 func NewCanonicalTeamID(provider ProviderID, league LeagueID, teamID ProviderTeamID) CanonicalTeamID {
@@ -81,6 +83,18 @@ type Game struct {
 	Overtime       bool       `json:"overtime"`
 	Shootout       bool       `json:"shootout"`
 	Tie            bool       `json:"tie,omitempty"`
+	Inning         int        `json:"inning,omitempty"`
+	InningHalf     string     `json:"inningHalf,omitempty"`
+	Balls          int        `json:"balls,omitempty"`
+	Strikes        int        `json:"strikes,omitempty"`
+	Outs           int        `json:"outs,omitempty"`
+	RunnerOnFirst  bool       `json:"runnerOnFirst,omitempty"`
+	RunnerOnSecond bool       `json:"runnerOnSecond,omitempty"`
+	RunnerOnThird  bool       `json:"runnerOnThird,omitempty"`
+	GameNumber     int        `json:"gameNumber,omitempty"`
+	Doubleheader   bool       `json:"doubleheader,omitempty"`
+	GameLabel      string     `json:"gameLabel,omitempty"`
+	GameType       string     `json:"gameType,omitempty"`
 	FreshAsOf      time.Time  `json:"freshAsOf"`
 	Stale          bool       `json:"stale"`
 	AwayRecord     string     `json:"awayRecord,omitempty"`
@@ -99,10 +113,11 @@ type SportsSnapshot struct {
 }
 
 type SportsScheduleRequest struct {
-	League   LeagueID
-	TeamID   ProviderTeamID
-	Timezone string
-	Limit    int
+	League                     LeagueID
+	TeamID                     ProviderTeamID
+	Timezone                   string
+	Limit                      int
+	IncludeExhibitionOpponents bool
 }
 
 func (request SportsScheduleRequest) Validate() error {

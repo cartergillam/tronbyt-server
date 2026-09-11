@@ -112,6 +112,7 @@ var templateFiles = map[string]string{
 
 func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 	espnSports := providers.NewESPNAdapter(nil)
+	mlbSports := providers.NewMLBAdapter(nil)
 	s := &Server{
 		DB:          db,
 		Router:      http.NewServeMux(),
@@ -134,6 +135,7 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 			providers.LeagueCFL: espnSports,
 			providers.LeagueNBA: espnSports,
 			providers.LeagueNFL: espnSports,
+			providers.LeagueMLB: mlbSports,
 		}),
 	}
 	if cfg.ProviderCredentialMasterKey != "" {

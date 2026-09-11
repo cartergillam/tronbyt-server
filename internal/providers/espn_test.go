@@ -38,6 +38,169 @@ func espnTestAdapter(t *testing.T, handler http.HandlerFunc) *ESPNAdapter {
 	return adapter
 }
 
+func mlbTestAdapter(t *testing.T, handler http.HandlerFunc) *MLBAdapter {
+	t.Helper()
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		return recorder.Result(), nil
+	})}
+	adapter := NewMLBAdapter(client)
+	adapter.BaseURL = "https://mlb.test/schedule"
+	adapter.Cache = NewCache[SportsSnapshot](0)
+	adapter.Now = func() time.Time { return time.Date(2026, 7, 31, 20, 0, 0, 0, time.UTC) }
+	return adapter
+}
+
+func TestMLBFixtureNormalizesBaseballContextAndStates(t *testing.T) {
+	adapter := mlbTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write(espnFixture(t, "mlb_states.json"))
+	})
+	games, err := adapter.fetchGames(context.Background(), "141", time.Now(), time.Now(), false)
+	require.NoError(t, err)
+	require.Len(t, games, 14)
+	byID := map[string]Game{}
+	for _, game := range games {
+		byID[game.ProviderGameID] = game
+	}
+	for id, status := range map[string]GameStatus{"1001": GameScheduled, "1002": GamePregame, "1003": GameLive, "1004": GameLive, "1005": GameIntermission, "1006": GameLive, "1007": GameFinal, "1008": GamePostponed, "1009": GameSuspended, "1010": GameDelayed, "1011": GameCancelled, "1012": GameUnknown, "1013": GameFinal, "1014": GameScheduled} {
+		assert.Equal(t, status, byID[id].Status, "game %s", id)
+	}
+	assert.Equal(t, LeagueMLB, byID["1001"].League)
+	assert.Equal(t, CanonicalTeamID("mlb-stats-api:mlb:141"), byID["1001"].AwayTeam.ID)
+	assert.Equal(t, "TOR", byID["1001"].AwayTeam.Abbreviation)
+	assert.Equal(t, "52-38", byID["1001"].AwayRecord)
+	assert.Equal(t, 3, byID["1003"].Inning)
+	assert.Equal(t, "top", byID["1003"].InningHalf)
+	assert.Equal(t, 2, byID["1003"].Outs)
+	assert.True(t, byID["1003"].RunnerOnFirst)
+	assert.True(t, byID["1003"].RunnerOnThird)
+	assert.Equal(t, "bottom", byID["1004"].InningHalf)
+	assert.Equal(t, "middle", byID["1005"].InningHalf)
+	assert.Equal(t, "MIDDLE 3", byID["1005"].StatusDetail)
+	assert.True(t, byID["1006"].Overtime)
+	assert.Equal(t, 11, byID["1006"].Inning)
+	assert.Equal(t, "FINAL", byID["1007"].StatusDetail)
+}
+
+func TestMLBSchedulePreservesLocalWindowDateBoundaryAndDoubleheaderOrder(t *testing.T) {
+	adapter := mlbTestAdapter(t, func(writer http.ResponseWriter, request *http.Request) {
+		assert.Equal(t, "1", request.URL.Query().Get("sportId"))
+		assert.Equal(t, "141", request.URL.Query().Get("teamId"))
+		assert.Equal(t, "linescore", request.URL.Query().Get("hydrate"))
+		assert.Equal(t, "2026-07-30", request.URL.Query().Get("startDate"))
+		assert.Equal(t, "2026-08-02", request.URL.Query().Get("endDate"))
+		_, _ = writer.Write(espnFixture(t, "mlb_states.json"))
+	})
+	adapter.Now = func() time.Time { return time.Date(2026, 8, 1, 1, 0, 0, 0, time.UTC) }
+	snapshot, err := adapter.Schedule(context.Background(), SportsScheduleRequest{League: LeagueMLB, TeamID: "141", Timezone: "America/Toronto"})
+	require.NoError(t, err)
+	require.NotEmpty(t, snapshot.Games)
+	assert.Equal(t, LeagueMLB, snapshot.League)
+	assert.Equal(t, "2026-07-31T19:09:00-04:00", snapshot.Games[0].ScheduledLocal)
+	assert.Equal(t, "1003", snapshot.Games[0].ProviderGameID, "live game outranks preview/final like the incumbent app")
+	foundG2 := false
+	for _, game := range snapshot.Games {
+		if game.ProviderGameID == "1014" {
+			foundG2 = true
+			assert.NotEmpty(t, game.GameLabel)
+			assert.Equal(t, 2, game.GameNumber)
+			assert.True(t, game.Doubleheader)
+		}
+	}
+	assert.True(t, foundG2)
+}
+
+func TestMLBOffDayFutureMalformedAndStableIdentity(t *testing.T) {
+	t.Run("off day", func(t *testing.T) {
+		adapter := mlbTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) { _, _ = writer.Write([]byte(`{"dates":[]}`)) })
+		snapshot, err := adapter.LiveGames(context.Background(), SportsLiveRequest{League: LeagueMLB, Timezone: "America/Toronto"})
+		require.NoError(t, err)
+		assert.Empty(t, snapshot.Games)
+		policy := espnCachePolicy(snapshot)
+		assert.Equal(t, 20*time.Minute, policy.FreshTTL)
+		assert.Equal(t, 45*time.Minute, policy.StaleTTL)
+	})
+	t.Run("future", func(t *testing.T) {
+		payload := `{"dates":[{"games":[{"gamePk":2001,"gameDate":"2026-08-02T23:07:00Z","gameType":"R","gameNumber":1,"status":{"abstractGameState":"Preview","detailedState":"Scheduled"},"teams":{"away":{"team":{"id":141}},"home":{"team":{"id":138}}}}]}]}`
+		adapter := mlbTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) { _, _ = writer.Write([]byte(payload)) })
+		snapshot, err := adapter.Schedule(context.Background(), SportsScheduleRequest{League: LeagueMLB, TeamID: "141", Timezone: "America/Toronto"})
+		require.NoError(t, err)
+		assert.Empty(t, snapshot.Games)
+		require.NotNil(t, snapshot.NextGame)
+		assert.Equal(t, "2001", snapshot.NextGame.ProviderGameID)
+	})
+	t.Run("malformed and partial", func(t *testing.T) {
+		adapter := mlbTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write(espnFixture(t, "malformed.json"))
+		})
+		_, err := adapter.fetchGames(context.Background(), "141", time.Now(), time.Now(), false)
+		var sanitized SanitizedError
+		require.ErrorAs(t, err, &sanitized)
+		assert.Equal(t, "sports_response_invalid", sanitized.Code)
+		adapter = mlbTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write([]byte(`{"dates":[{"games":[{"gamePk":0}]}]}`))
+		})
+		games, err := adapter.fetchGames(context.Background(), "141", time.Now(), time.Now(), false)
+		require.NoError(t, err)
+		assert.Empty(t, games)
+	})
+	teams, err := NewMLBAdapter(nil).Teams(context.Background(), LeagueMLB)
+	require.NoError(t, err)
+	require.Len(t, teams, 30)
+	assert.Equal(t, CanonicalTeamID("mlb-stats-api:mlb:141"), mlbTeams["141"].ID)
+	assert.Equal(t, "TOR", mlbTeams["141"].Abbreviation)
+}
+
+func TestMLBDoubleheaderKeepsBothStableGamesAndLabelsSecondGame(t *testing.T) {
+	location, err := time.LoadLocation("America/Toronto")
+	require.NoError(t, err)
+	start := time.Date(2026, 7, 31, 17, 0, 0, 0, location).UTC()
+	games := []Game{
+		{ID: NewGameID(ProviderMLB, LeagueMLB, "first"), ProviderGameID: "first", League: LeagueMLB, AwayTeam: mlbTeams["141"], HomeTeam: mlbTeams["138"], Status: GameFinal, ScheduledAt: start, GameType: "R", GameNumber: 1},
+		{ID: NewGameID(ProviderMLB, LeagueMLB, "second"), ProviderGameID: "second", League: LeagueMLB, AwayTeam: mlbTeams["141"], HomeTeam: mlbTeams["138"], Status: GameScheduled, ScheduledAt: start.Add(6 * time.Hour), GameType: "R", GameNumber: 2},
+	}
+	selected := selectMLBCurrentGames(games, "141", "America/Toronto", start)
+	require.Len(t, selected, 2)
+	assert.Equal(t, "second", selected[0].ProviderGameID, "scheduled G2 retains incumbent priority over final G1")
+	assert.Equal(t, "G2", selected[0].GameLabel)
+	assert.Equal(t, "G1", selected[1].GameLabel)
+	assert.NotEqual(t, selected[0].ID, selected[1].ID)
+}
+
+func TestMLBStaleFallbackAndProviderFailureWithoutCache(t *testing.T) {
+	var fail atomic.Bool
+	adapter := mlbTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) {
+		if fail.Load() {
+			writer.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = writer.Write(espnFixture(t, "mlb_states.json"))
+	})
+	request := SportsLiveRequest{League: LeagueMLB, Timezone: "UTC"}
+	_, err := adapter.LiveGames(context.Background(), request)
+	require.NoError(t, err)
+	key := "mlb:live:UTC:20260731"
+	adapter.Cache.mu.Lock()
+	entry := adapter.Cache.entries[key]
+	entry.freshUntil = time.Now().Add(-time.Second)
+	entry.staleUntil = time.Now().Add(time.Minute)
+	adapter.Cache.entries[key] = entry
+	adapter.Cache.mu.Unlock()
+	fail.Store(true)
+	stale, err := adapter.LiveGames(context.Background(), request)
+	require.NoError(t, err)
+	assert.True(t, stale.Stale)
+	require.NotEmpty(t, stale.Games)
+	assert.True(t, stale.Games[0].Stale)
+
+	other := mlbTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusServiceUnavailable) })
+	_, err = other.LiveGames(context.Background(), request)
+	var sanitized SanitizedError
+	require.ErrorAs(t, err, &sanitized)
+	assert.Equal(t, "sports_provider_unavailable", sanitized.Code)
+}
+
 func TestNFLFixtureNormalizesStatesRecordsOvertimeAndTie(t *testing.T) {
 	adapter := espnTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) {
 		_, _ = writer.Write(espnFixture(t, "nfl_states.json"))
