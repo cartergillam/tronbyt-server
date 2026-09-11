@@ -58,6 +58,7 @@ type Server struct {
 	Provisioning    *provisioning.Service
 	MarketProvider  providers.MarketProvider
 	WeatherProvider providers.WeatherProvider
+	SportsProvider  providers.SportsProvider
 
 	systemAppsCache      []apps.AppMetadata
 	systemAppsCacheMutex sync.RWMutex
@@ -127,6 +128,7 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 		PromRegistry:      prometheus.DefaultRegisterer,
 		PromGatherer:      prometheus.DefaultGatherer,
 		diagnosticsEvents: newDeviceEventTimeline(100),
+		SportsProvider:    providers.NewNHLAdapter(nil),
 	}
 	if cfg.ProviderCredentialMasterKey != "" {
 		store, err := credentials.NewStore(db, cfg.ProviderCredentialMasterKey)

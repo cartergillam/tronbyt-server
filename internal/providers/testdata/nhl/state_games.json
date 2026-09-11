@@ -1,0 +1,19 @@
+{
+  "games": [
+    {"id": 1001, "startTimeUTC": "2026-01-10T00:00:00Z", "gameState": "FUT", "gameScheduleState": "OK", "awayTeam": {"id": 10, "abbrev": "TOR"}, "homeTeam": {"id": 6, "abbrev": "BOS"}},
+    {"id": 1002, "startTimeUTC": "2026-01-10T01:00:00Z", "gameState": "PRE", "gameScheduleState": "OK", "awayTeam": {"id": 8, "abbrev": "MTL"}, "homeTeam": {"id": 9, "abbrev": "OTT"}},
+    {"id": 1003, "startTimeUTC": "2026-01-10T02:00:00Z", "gameState": "LIVE", "gameScheduleState": "OK", "awayTeam": {"id": 3, "abbrev": "NYR", "score": 1}, "homeTeam": {"id": 4, "abbrev": "PHI", "score": 0}, "clock": {"timeRemaining": "12:34", "inIntermission": false}, "periodDescriptor": {"number": 1, "periodType": "REG"}},
+    {"id": 1004, "startTimeUTC": "2026-01-10T02:01:00Z", "gameState": "LIVE", "gameScheduleState": "OK", "awayTeam": {"id": 5, "abbrev": "PIT", "score": 2}, "homeTeam": {"id": 7, "abbrev": "BUF", "score": 2}, "clock": {"timeRemaining": "09:10", "inIntermission": false}, "periodDescriptor": {"number": 2, "periodType": "REG"}},
+    {"id": 1005, "startTimeUTC": "2026-01-10T02:02:00Z", "gameState": "CRIT", "gameScheduleState": "OK", "awayTeam": {"id": 12, "abbrev": "CAR", "score": 3}, "homeTeam": {"id": 13, "abbrev": "FLA", "score": 2}, "clock": {"timeRemaining": "01:00", "inIntermission": false}, "periodDescriptor": {"number": 3, "periodType": "REG"}},
+    {"id": 1006, "startTimeUTC": "2026-01-10T02:03:00Z", "gameState": "LIVE", "gameScheduleState": "OK", "awayTeam": {"id": 14, "abbrev": "TBL", "score": 1}, "homeTeam": {"id": 15, "abbrev": "WSH", "score": 1}, "clock": {"timeRemaining": "00:00", "inIntermission": true}, "periodDescriptor": {"number": 2, "periodType": "REG"}},
+    {"id": 1007, "startTimeUTC": "2026-01-10T02:04:00Z", "gameState": "LIVE", "gameScheduleState": "OK", "awayTeam": {"id": 16, "abbrev": "CHI", "score": 2}, "homeTeam": {"id": 17, "abbrev": "DET", "score": 2}, "clock": {"timeRemaining": "03:21", "inIntermission": false}, "periodDescriptor": {"number": 4, "periodType": "OT"}},
+    {"id": 1008, "startTimeUTC": "2026-01-10T02:05:00Z", "gameState": "LIVE", "gameScheduleState": "OK", "awayTeam": {"id": 18, "abbrev": "NSH", "score": 3}, "homeTeam": {"id": 19, "abbrev": "STL", "score": 3}, "periodDescriptor": {"number": 5, "periodType": "SO"}},
+    {"id": 1009, "startTimeUTC": "2026-01-10T02:06:00Z", "gameState": "FINAL", "gameScheduleState": "OK", "awayTeam": {"id": 20, "abbrev": "CGY", "score": 1}, "homeTeam": {"id": 21, "abbrev": "COL", "score": 4}, "periodDescriptor": {"number": 3, "periodType": "REG"}, "gameOutcome": {"lastPeriodType": "REG"}},
+    {"id": 1010, "startTimeUTC": "2026-01-10T02:07:00Z", "gameState": "OFF", "gameScheduleState": "OK", "awayTeam": {"id": 22, "abbrev": "EDM", "score": 4}, "homeTeam": {"id": 23, "abbrev": "VAN", "score": 3}, "gameOutcome": {"lastPeriodType": "OT"}},
+    {"id": 1011, "startTimeUTC": "2026-01-10T02:08:00Z", "gameState": "FINAL", "gameScheduleState": "OK", "awayTeam": {"id": 24, "abbrev": "ANA", "score": 2}, "homeTeam": {"id": 25, "abbrev": "DAL", "score": 3}, "gameOutcome": {"lastPeriodType": "SO"}},
+    {"id": 1012, "startTimeUTC": "2026-01-10T02:09:00Z", "gameState": "FUT", "gameScheduleState": "DELAYED", "awayTeam": {"id": 26, "abbrev": "LAK"}, "homeTeam": {"id": 28, "abbrev": "SJS"}},
+    {"id": 1013, "startTimeUTC": "2026-01-10T02:10:00Z", "gameState": "FUT", "gameScheduleState": "PPD", "awayTeam": {"id": 29, "abbrev": "CBJ"}, "homeTeam": {"id": 30, "abbrev": "MIN"}},
+    {"id": 1014, "startTimeUTC": "2026-01-10T02:11:00Z", "gameState": "FUT", "gameScheduleState": "SUSPENDED", "awayTeam": {"id": 52, "abbrev": "WPG"}, "homeTeam": {"id": 54, "abbrev": "VGK"}},
+    {"id": 1015, "startTimeUTC": "2026-01-10T02:12:00Z", "gameState": "FUT", "gameScheduleState": "CANCELLED", "awayTeam": {"id": 55, "abbrev": "SEA"}, "homeTeam": {"id": 68, "abbrev": "UTA"}}
+  ]
+}

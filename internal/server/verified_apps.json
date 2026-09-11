@@ -43,5 +43,11 @@
     "candidate": true,
     "recommended": false,
     "compatibilityNotes": "Candidate using server-managed OpenWeather One Call 3.0 data; requires configured credentials and physical approval."
+  },
+  "nhl-live": {
+    "verified": false,
+    "candidate": true,
+    "recommended": false,
+    "compatibilityNotes": "Candidate using normalized server-managed NHL data; requires physical approval on a 64x32 display."
   }
 }

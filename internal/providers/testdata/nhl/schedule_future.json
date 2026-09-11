@@ -1,0 +1,4 @@
+{"games":[
+  {"id":2002,"startTimeUTC":"2026-01-12T00:00:00Z","gameState":"FUT","gameScheduleState":"OK","awayTeam":{"id":10,"abbrev":"TOR"},"homeTeam":{"id":8,"abbrev":"MTL"}},
+  {"id":2001,"startTimeUTC":"2026-01-11T00:00:00Z","gameState":"FUT","gameScheduleState":"OK","awayTeam":{"id":6,"abbrev":"BOS"},"homeTeam":{"id":10,"abbrev":"TOR"}}
+]}

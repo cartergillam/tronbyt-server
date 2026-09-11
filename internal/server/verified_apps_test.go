@@ -20,7 +20,7 @@ func TestVerifiedManifestIsExplicitAndConservative(t *testing.T) {
 		assert.NotEmpty(t, metadata.VerifiedVersion)
 		assert.NotEmpty(t, metadata.VerificationDate)
 	}
-	for _, id := range []string{"cfl-scores", "market-watch", "local-weather"} {
+	for _, id := range []string{"cfl-scores", "market-watch", "local-weather", "nhl-live"} {
 		metadata, ok := verifiedMetadataFor(id)
 		require.True(t, ok, id)
 		assert.False(t, metadata.Verified)

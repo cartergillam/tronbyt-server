@@ -100,9 +100,6 @@ func (s *Server) RenderApp(ctx context.Context, device *data.Device, app *data.A
 func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Device, app *data.App, config map[string]any) {
 	credentialID, _ := config["credential_id"].(string)
 	credentialID = strings.TrimSpace(credentialID)
-	if credentialID == "" {
-		return
-	}
 	setError := func(err error) {
 		code := "provider_temporarily_unavailable"
 		message := "Provider data is temporarily unavailable"
@@ -115,6 +112,10 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 	}
 	switch app.Name {
 	case "market-watch":
+		if credentialID == "" {
+			setError(providers.MissingCredential("Market data"))
+			return
+		}
 		if s.MarketProvider == nil {
 			setError(providers.TemporarilyUnavailable())
 			return
@@ -128,6 +129,10 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 		encoded, _ := json.Marshal(quotes)
 		config["$provider_data"] = string(encoded)
 	case "local-weather":
+		if credentialID == "" {
+			setError(providers.MissingCredential("Weather"))
+			return
+		}
 		if s.WeatherProvider == nil {
 			setError(providers.TemporarilyUnavailable())
 			return
@@ -150,6 +155,51 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 		}
 		encoded, _ := json.Marshal(snapshot)
 		config["$provider_data"] = string(encoded)
+	case "nhl-live":
+		if s.SportsProvider == nil {
+			setError(providers.SportsUnavailable())
+			return
+		}
+		timezone := device.GetTimezone()
+		mode, _ := config["mode"].(string)
+		teamID := providerTeamID(config["teamid"])
+		// Historical NHL Live installs used teamid=0 for random/all teams.
+		// Preserve that behavior by mapping it to the deterministic all-live mode.
+		if mode == "all_live" || teamID == "0" {
+			snapshot, err := s.SportsProvider.LiveGames(ctx, providers.SportsLiveRequest{League: providers.LeagueNHL, Timezone: timezone})
+			if err != nil {
+				setError(err)
+				return
+			}
+			encoded, _ := json.Marshal(snapshot)
+			config["$provider_data"] = string(encoded)
+			return
+		}
+		if teamID == "" {
+			teamID = "10"
+		}
+		snapshot, err := s.SportsProvider.Schedule(ctx, providers.SportsScheduleRequest{League: providers.LeagueNHL, TeamID: teamID, Timezone: timezone})
+		if err != nil {
+			setError(err)
+			return
+		}
+		encoded, _ := json.Marshal(snapshot)
+		config["$provider_data"] = string(encoded)
+	}
+}
+
+func providerTeamID(value any) providers.ProviderTeamID {
+	switch typed := value.(type) {
+	case string:
+		return providers.ProviderTeamID(strings.TrimSpace(typed))
+	case float64:
+		return providers.ProviderTeamID(fmt.Sprintf("%.0f", typed))
+	case int:
+		return providers.ProviderTeamID(fmt.Sprintf("%d", typed))
+	case int64:
+		return providers.ProviderTeamID(fmt.Sprintf("%d", typed))
+	default:
+		return ""
 	}
 }
 

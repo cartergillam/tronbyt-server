@@ -30,6 +30,26 @@ func (provider *recordingWeatherProvider) Weather(_ context.Context, request pro
 	return providers.WeatherSnapshot{Location: request.Location, ProviderUpdated: time.Unix(1, 0)}, nil
 }
 
+type recordingSportsProvider struct {
+	scheduleRequests []providers.SportsScheduleRequest
+	liveRequests     []providers.SportsLiveRequest
+	err              error
+}
+
+func (provider *recordingSportsProvider) Teams(context.Context, providers.LeagueID) ([]providers.Team, error) {
+	return nil, provider.err
+}
+
+func (provider *recordingSportsProvider) Schedule(_ context.Context, request providers.SportsScheduleRequest) (providers.SportsSnapshot, error) {
+	provider.scheduleRequests = append(provider.scheduleRequests, request)
+	return providers.SportsSnapshot{League: providers.LeagueNHL, Provider: providers.ProviderNHLWeb, DeviceTimezone: request.Timezone, Games: []providers.Game{}}, provider.err
+}
+
+func (provider *recordingSportsProvider) LiveGames(_ context.Context, request providers.SportsLiveRequest) (providers.SportsSnapshot, error) {
+	provider.liveRequests = append(provider.liveRequests, request)
+	return providers.SportsSnapshot{League: providers.LeagueNHL, Provider: providers.ProviderNHLWeb, DeviceTimezone: request.Timezone, Games: []providers.Game{}}, provider.err
+}
+
 func TestManagedMarketDataUsesOwnerScopeAndKeepsDevicesOutOfSharedInputs(t *testing.T) {
 	provider := &recordingMarketProvider{}
 	server := &Server{MarketProvider: provider}
@@ -103,6 +123,43 @@ func TestManagedWeatherDataInheritsDeviceLocationAndIsolatesCustomOverride(t *te
 	assert.Equal(t, "America/Vancouver", provider.requests[1].Location.Timezone)
 	assert.Equal(t, "metric", provider.requests[0].Units)
 	assert.Equal(t, "imperial", provider.requests[1].Units)
+}
+
+func TestManagedNHLDataUsesStableTeamIDAndDeviceTimezoneWithoutCredential(t *testing.T) {
+	provider := &recordingSportsProvider{}
+	server := &Server{SportsProvider: provider}
+	device := &data.Device{ID: "display-a", Username: "owner", Timezone: stringPointer("America/Toronto")}
+	config := map[string]any{"mode": "favorite", "teamid": "10"}
+	server.injectManagedProviderData(context.Background(), device, &data.App{Name: "nhl-live"}, config)
+	require.Len(t, provider.scheduleRequests, 1)
+	assert.Equal(t, providers.ProviderTeamID("10"), provider.scheduleRequests[0].TeamID)
+	assert.Equal(t, "America/Toronto", provider.scheduleRequests[0].Timezone)
+	assert.Contains(t, config, "$provider_data")
+	assert.NotContains(t, config, "credential_id")
+}
+
+func TestManagedNHLLiveAndLegacyRandomModesUseAllLiveGames(t *testing.T) {
+	for name, config := range map[string]map[string]any{
+		"explicit": {"mode": "all_live", "teamid": "10"},
+		"legacy":   {"teamid": "0"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			provider := &recordingSportsProvider{}
+			server := &Server{SportsProvider: provider}
+			server.injectManagedProviderData(context.Background(), &data.Device{Timezone: stringPointer("America/Vancouver")}, &data.App{Name: "nhl-live"}, config)
+			require.Len(t, provider.liveRequests, 1)
+			assert.Equal(t, "America/Vancouver", provider.liveRequests[0].Timezone)
+			assert.Empty(t, provider.scheduleRequests)
+		})
+	}
+}
+
+func TestManagedNHLProviderErrorsAreSanitized(t *testing.T) {
+	provider := &recordingSportsProvider{err: providers.SanitizedError{Code: "sports_response_invalid", Message: "NHL data could not be read", Retryable: true}}
+	config := map[string]any{"teamid": 10.0}
+	(&Server{SportsProvider: provider}).injectManagedProviderData(context.Background(), &data.Device{}, &data.App{Name: "nhl-live"}, config)
+	assert.NotContains(t, config, "$provider_data")
+	assert.JSONEq(t, `{"code":"sports_response_invalid","message":"NHL data could not be read"}`, config["$provider_error"].(string))
 }
 
 func stringPointer(value string) *string { return &value }
