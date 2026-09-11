@@ -73,6 +73,9 @@ jobs:
 
           compose_dir="/home/ubuntu/tronbyt/server"
           override_file="docker-compose.override.yaml"
+          apps_checkout="/var/lib/docker/volumes/server_data/_data/system-apps"
+          expected_apps_repo="https://github.com/cartergillam/apps.git"
+          expected_apps_ref="feature/mlb-clock-reliability"
           image_ref="ghcr.io/cartergillam/tronbyt-server:mobile-api"
           deployment_timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           old_image_id="unavailable"
@@ -106,14 +109,50 @@ jobs:
           fi
           APPS_COMMIT="$(printf '%s' "$APPS_COMMIT" | tr '[:upper:]' '[:lower:]')"
 
-          cd "$compose_dir"
-          test -f docker-compose.yaml
-          test -f "$override_file"
-          # Refuse a deployment that would cause server startup to bootstrap an
-          # apps checkout. This workflow never clones or pulls the apps repo.
-          test -d data/system-apps/.git
-          test "$(git -C data/system-apps remote get-url origin)" = "https://github.com/cartergillam/apps.git"
-          test "$(git -C data/system-apps branch --show-current)" = "feature/mlb-clock-reliability"
+          if [ ! -d "$compose_dir" ]; then
+            echo "ERROR: Compose directory is missing: $compose_dir" >&2
+            exit 1
+          fi
+          if ! cd "$compose_dir"; then
+            echo "ERROR: could not enter Compose directory: $compose_dir" >&2
+            exit 1
+          fi
+          if [ ! -f docker-compose.yaml ]; then
+            echo "ERROR: Compose file is missing: $compose_dir/docker-compose.yaml" >&2
+            exit 1
+          fi
+          if [ ! -f "$override_file" ]; then
+            echo "ERROR: Compose override is missing: $compose_dir/$override_file" >&2
+            exit 1
+          fi
+
+          # The persistent apps checkout is inside Docker's root-owned named
+          # volume, not below the Compose directory. These are read-only
+          # preflight checks; this workflow never clones or pulls the apps repo.
+          if ! sudo -n test -d "$apps_checkout"; then
+            echo "ERROR: persistent apps checkout directory is unavailable: $apps_checkout" >&2
+            exit 1
+          fi
+          if ! sudo -n test -e "$apps_checkout/.git"; then
+            echo "ERROR: persistent apps checkout is not a Git checkout: $apps_checkout" >&2
+            exit 1
+          fi
+          if ! checkout_origin="$(sudo -n git -c "safe.directory=$apps_checkout" -C "$apps_checkout" remote get-url origin)"; then
+            echo "ERROR: could not inspect the persistent apps checkout origin with sudo." >&2
+            exit 1
+          fi
+          if [ "$checkout_origin" != "$expected_apps_repo" ]; then
+            echo "ERROR: persistent apps checkout origin does not match the required production repository." >&2
+            exit 1
+          fi
+          if ! checkout_branch="$(sudo -n git -c "safe.directory=$apps_checkout" -C "$apps_checkout" branch --show-current)"; then
+            echo "ERROR: could not inspect the persistent apps checkout branch with sudo." >&2
+            exit 1
+          fi
+          if [ "$checkout_branch" != "$expected_apps_ref" ]; then
+            echo "ERROR: persistent apps checkout branch does not match the required production ref." >&2
+            exit 1
+          fi
 
           backup_file="${override_file}.deploy-${deployment_timestamp//[:]/}.bak"
           cp -p "$override_file" "$backup_file"

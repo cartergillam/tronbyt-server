@@ -38,9 +38,18 @@ The Environment can later require reviewers before a deployment begins.
 4. Run the workflow and wait for its `Tronbyt production deployment` summary.
 
 The workflow accepts only a full hexadecimal Git SHA. It refuses to run if the
-Oracle Compose directory, override file, or existing `data/system-apps` Git
-checkout is missing. It also verifies that checkout's origin and branch before
-restarting the server. That preflight prevents this workflow from initiating an
+Oracle Compose directory, override file, or persistent apps checkout is
+missing. The checkout is stored in Docker's named volume at
+`/var/lib/docker/volumes/server_data/_data/system-apps`, mounted into the
+container as `/app/data/system-apps`; it is not under the Compose directory.
+
+Because Docker owns that volume, the deployment user reads it through narrowly
+scoped `sudo -n` checks. Every Git inspection uses a one-shot
+`-c safe.directory=/var/lib/docker/volumes/server_data/_data/system-apps`
+argument and never changes global Git configuration. The workflow verifies the
+checkout origin and branch before restarting the server, but deliberately does
+not require its current commit to equal `apps_commit`: deployment is how that
+checkout advances. These preflights prevent the workflow from initiating an
 apps clone on the resource-constrained VM.
 
 ## What the workflow does
