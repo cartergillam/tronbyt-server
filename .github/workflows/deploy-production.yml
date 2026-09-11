@@ -1,0 +1,256 @@
+name: Deploy Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      apps_commit:
+        description: Full SHA of the reviewed tronbyt-apps commit to deploy
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tronbyt-production-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy web service
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    env:
+      APPS_COMMIT: ${{ inputs.apps_commit }}
+      ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+      ORACLE_USER: ${{ secrets.ORACLE_USER }}
+      ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+      ORACLE_KNOWN_HOSTS: ${{ secrets.ORACLE_KNOWN_HOSTS }}
+
+    steps:
+      - name: Validate deployment input
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          if [[ ! "$APPS_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "apps_commit must be a full 40-character Git SHA." >&2
+            exit 1
+          fi
+
+      - name: Deploy prebuilt image on Oracle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+
+          ssh_dir="$(mktemp -d)"
+          remote_report="$(mktemp)"
+          cleanup() {
+            rm -rf "$ssh_dir"
+            rm -f "$remote_report"
+          }
+          trap cleanup EXIT
+
+          install -m 700 -d "$ssh_dir"
+          printf '%s\n' "$ORACLE_SSH_KEY" > "$ssh_dir/id_ed25519"
+          chmod 600 "$ssh_dir/id_ed25519"
+          printf '%s\n' "$ORACLE_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          chmod 600 "$ssh_dir/known_hosts"
+
+          set +e
+          ssh \
+            -i "$ssh_dir/id_ed25519" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=20 \
+            -o LogLevel=ERROR \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$ssh_dir/known_hosts" \
+            "$ORACLE_USER@$ORACLE_HOST" "APPS_COMMIT='$APPS_COMMIT' bash -s" > "$remote_report" 2>&1 <<'REMOTE'
+          set -Eeuo pipefail
+          set +x
+
+          compose_dir="/home/ubuntu/tronbyt/server"
+          override_file="docker-compose.override.yaml"
+          image_ref="ghcr.io/cartergillam/tronbyt-server:mobile-api"
+          deployment_timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          old_image_id="unavailable"
+          old_image_ref="unavailable"
+          new_image_id="unavailable"
+          new_image_created="unavailable"
+          backup_file="unavailable"
+
+          failure_summary() {
+            exit_code="$1"
+            printf 'DEPLOYMENT_RESULT=failed\n'
+            printf 'DEPLOYMENT_TIMESTAMP=%s\n' "$deployment_timestamp"
+            printf 'APPS_COMMIT=%s\n' "$APPS_COMMIT"
+            printf 'OLD_IMAGE_ID=%s\n' "$old_image_id"
+            printf 'OLD_IMAGE_REF=%s\n' "$old_image_ref"
+            printf 'NEW_IMAGE_ID=%s\n' "$new_image_id"
+            printf 'APPS_OVERRIDE_BACKUP=%s\n' "$backup_file"
+            if [ "$old_image_id" != "unavailable" ] && [ "$backup_file" != "unavailable" ]; then
+              printf 'ROLLBACK_1=cd %s && cp -p %s %s\n' "$compose_dir" "$backup_file" "$override_file"
+              printf 'ROLLBACK_2=printf %s > .tronbyt-rollback-image.yaml\n' "'services:\\n  web:\\n    image: $old_image_id\\n'"
+              printf 'ROLLBACK_3=docker compose -f docker-compose.yaml -f docker-compose.override.yaml -f .tronbyt-rollback-image.yaml up -d --no-deps --force-recreate web\n'
+              printf 'ROLLBACK_4=rm -f .tronbyt-rollback-image.yaml\n'
+            fi
+            exit "$exit_code"
+          }
+          trap 'failure_summary "$?"' ERR
+
+          if [[ ! "$APPS_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'ERROR: apps_commit was not a full Git SHA.' >&2
+            exit 1
+          fi
+          APPS_COMMIT="$(printf '%s' "$APPS_COMMIT" | tr '[:upper:]' '[:lower:]')"
+
+          cd "$compose_dir"
+          test -f docker-compose.yaml
+          test -f "$override_file"
+          # Refuse a deployment that would cause server startup to bootstrap an
+          # apps checkout. This workflow never clones or pulls the apps repo.
+          test -d data/system-apps/.git
+          test "$(git -C data/system-apps remote get-url origin)" = "https://github.com/cartergillam/apps.git"
+          test "$(git -C data/system-apps branch --show-current)" = "feature/mlb-clock-reliability"
+
+          backup_file="${override_file}.deploy-${deployment_timestamp//[:]/}.bak"
+          cp -p "$override_file" "$backup_file"
+
+          python3 - "$override_file" "$APPS_COMMIT" <<'PY'
+          import os
+          import re
+          import stat
+          import sys
+
+          path, expected_commit = sys.argv[1:]
+          with open(path, encoding="utf-8") as source:
+              lines = source.readlines()
+
+          def value_for(name):
+              patterns = (
+                  re.compile(r"^\s*-\s*" + re.escape(name) + r"=(.*?)(?:\s+#.*)?\s*$"),
+                  re.compile(r"^\s*" + re.escape(name) + r"\s*:\s*(.*?)(?:\s+#.*)?\s*$"),
+              )
+              values = []
+              for line in lines:
+                  for pattern in patterns:
+                      match = pattern.match(line)
+                      if match:
+                          values.append(match.group(1).strip().strip("\"'"))
+              if len(values) != 1:
+                  raise SystemExit("expected exactly one " + name + " entry in docker-compose.override.yaml")
+              return values[0]
+
+          if value_for("SYSTEM_APPS_REPO") != "https://github.com/cartergillam/apps.git":
+              raise SystemExit("SYSTEM_APPS_REPO does not match the production apps repository")
+          if value_for("SYSTEM_APPS_REF") != "feature/mlb-clock-reliability":
+              raise SystemExit("SYSTEM_APPS_REF does not match the production apps ref")
+
+          replace_patterns = (
+              re.compile(r"^(\s*-\s*SYSTEM_APPS_EXPECTED_COMMIT=)([^#\r\n]*)(\s*(?:#.*)?)(\r?\n?)$"),
+              re.compile(r"^(\s*SYSTEM_APPS_EXPECTED_COMMIT\s*:\s*)([^#\r\n]*)(\s*(?:#.*)?)(\r?\n?)$"),
+          )
+          changed = 0
+          updated = []
+          for line in lines:
+              for pattern in replace_patterns:
+                  match = pattern.match(line)
+                  if match:
+                      line = match.group(1) + expected_commit + match.group(3) + match.group(4)
+                      changed += 1
+                      break
+              updated.append(line)
+          if changed != 1:
+              raise SystemExit("expected exactly one SYSTEM_APPS_EXPECTED_COMMIT entry in docker-compose.override.yaml")
+
+          mode = stat.S_IMODE(os.stat(path).st_mode)
+          temporary = path + ".deployment-tmp"
+          with open(temporary, "w", encoding="utf-8") as destination:
+              destination.writelines(updated)
+          os.chmod(temporary, mode)
+          os.replace(temporary, path)
+          PY
+
+          # Validate Compose without emitting resolved environment values.
+          docker compose config -q
+
+          old_container_id="$(docker compose ps -q web)"
+          test -n "$old_container_id"
+          old_image_id="$(docker inspect --format '{{.Image}}' "$old_container_id")"
+          old_image_ref="$(docker inspect --format '{{.Config.Image}}' "$old_container_id")"
+
+          docker compose pull web
+          new_image_id="$(docker image inspect --format '{{.Id}}' "$image_ref")"
+          new_image_created="$(docker image inspect --format '{{.Created}}' "$image_ref")"
+
+          docker compose up -d --no-deps --force-recreate web
+          docker compose ps web
+
+          deadline=$((SECONDS + 300))
+          container_id=""
+          health="starting"
+          status="created"
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            container_id="$(docker compose ps -q web)"
+            test -n "$container_id"
+            health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id")"
+            status="$(docker inspect --format '{{.State.Status}}' "$container_id")"
+            if [ "$health" = "healthy" ] && [ "$status" = "running" ]; then
+              break
+            fi
+            if [ "$status" = "exited" ] || [ "$status" = "dead" ]; then
+              echo "ERROR: web container stopped before becoming healthy." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          if [ "$health" != "healthy" ] || [ "$status" != "running" ]; then
+            echo "ERROR: web container did not become healthy within five minutes." >&2
+            exit 1
+          fi
+
+          restart_count="$(docker inspect --format '{{.RestartCount}}' "$container_id")"
+          startup_logs="$(docker compose logs --no-color --tail=250 web | grep -Ei 'System apps checkout|System apps refresh|fatal|error|warn' || true)"
+          if [ -n "$startup_logs" ]; then
+            printf '%s\n' "$startup_logs" | sed -E 's/((token|secret|password|authorization|apikey)[^=[:space:]]*[=:])[[:space:]]*[^[:space:]]+/\1[REDACTED]/Ig'
+          fi
+          if ! docker compose logs --no-color --tail=250 web | grep -F 'System apps checkout ready' | grep -F "commit=$APPS_COMMIT" | grep -F 'update_succeeded=true' >/dev/null; then
+            echo 'ERROR: startup logs did not confirm the requested system-apps commit.' >&2
+            exit 1
+          fi
+          if docker compose logs --no-color --tail=250 web | grep -Eqi 'System apps checkout failed|\bfatal\b'; then
+            echo 'ERROR: startup logs contain a fatal apps-checkout condition.' >&2
+            exit 1
+          fi
+
+          printf 'DEPLOYMENT_RESULT=success\n'
+          printf 'DEPLOYMENT_TIMESTAMP=%s\n' "$deployment_timestamp"
+          printf 'APPS_COMMIT=%s\n' "$APPS_COMMIT"
+          printf 'OLD_IMAGE_ID=%s\n' "$old_image_id"
+          printf 'OLD_IMAGE_REF=%s\n' "$old_image_ref"
+          printf 'NEW_IMAGE_ID=%s\n' "$new_image_id"
+          printf 'NEW_IMAGE_CREATED=%s\n' "$new_image_created"
+          printf 'CONTAINER_HEALTH=%s\n' "$health"
+          printf 'CONTAINER_STATUS=%s\n' "$status"
+          printf 'RESTART_COUNT=%s\n' "$restart_count"
+          printf 'APPS_OVERRIDE_BACKUP=%s\n' "$backup_file"
+          REMOTE
+          ssh_status=$?
+          set -e
+
+          cat "$remote_report"
+          {
+            echo '## Tronbyt production deployment'
+            echo
+            grep -E '^(DEPLOYMENT_RESULT|DEPLOYMENT_TIMESTAMP|APPS_COMMIT|OLD_IMAGE_ID|OLD_IMAGE_REF|NEW_IMAGE_ID|NEW_IMAGE_CREATED|CONTAINER_HEALTH|CONTAINER_STATUS|RESTART_COUNT|APPS_OVERRIDE_BACKUP|ROLLBACK_)=' "$remote_report" || true
+            echo
+            if [ "$ssh_status" -eq 0 ]; then
+              echo 'Result: deployment completed successfully.'
+            else
+              echo 'Result: deployment failed. The old image and rollback instructions above were preserved for operator review.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$ssh_status"
