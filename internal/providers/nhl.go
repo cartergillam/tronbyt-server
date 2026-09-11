@@ -61,9 +61,12 @@ func (adapter *NHLAdapter) Schedule(ctx context.Context, request SportsScheduleR
 	if err := request.Validate(); err != nil {
 		return SportsSnapshot{}, err
 	}
+	if request.League != LeagueNHL {
+		return SportsSnapshot{}, errorsForUnsupportedLeague()
+	}
 	team, ok := nhlTeams[request.TeamID]
 	if !ok {
-		return SportsSnapshot{}, UnknownSportsTeam(request.TeamID)
+		return SportsSnapshot{}, UnknownSportsTeam(LeagueNHL, request.TeamID)
 	}
 	key := "nhl:schedule:" + string(request.TeamID) + ":" + request.Timezone
 	snapshot, stale, err := adapter.Cache.GetWithPolicy(ctx, key, func(ctx context.Context) (SportsSnapshot, CachePolicy, error) {
@@ -98,6 +101,9 @@ func (adapter *NHLAdapter) Schedule(ctx context.Context, request SportsScheduleR
 func (adapter *NHLAdapter) LiveGames(ctx context.Context, request SportsLiveRequest) (SportsSnapshot, error) {
 	if err := request.Validate(); err != nil {
 		return SportsSnapshot{}, err
+	}
+	if request.League != LeagueNHL {
+		return SportsSnapshot{}, errorsForUnsupportedLeague()
 	}
 	key := "nhl:live:" + request.Timezone
 	snapshot, stale, err := adapter.Cache.GetWithPolicy(ctx, key, func(ctx context.Context) (SportsSnapshot, CachePolicy, error) {
@@ -410,6 +416,10 @@ func markSportsSnapshotStale(snapshot SportsSnapshot, stale bool) SportsSnapshot
 		copy := *snapshot.NextGame
 		copy.Stale = true
 		snapshot.NextGame = &copy
+	}
+	snapshot.UpcomingGames = append([]Game(nil), snapshot.UpcomingGames...)
+	for index := range snapshot.UpcomingGames {
+		snapshot.UpcomingGames[index].Stale = true
 	}
 	return snapshot
 }

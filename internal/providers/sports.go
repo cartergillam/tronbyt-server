@@ -3,7 +3,6 @@ package providers
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 )
@@ -16,7 +15,9 @@ type GameID string
 
 const (
 	LeagueNHL      LeagueID   = "nhl"
+	LeagueCFL      LeagueID   = "cfl"
 	ProviderNHLWeb ProviderID = "nhl-web"
+	ProviderESPN   ProviderID = "espn-site"
 )
 
 func NewCanonicalTeamID(provider ProviderID, league LeagueID, teamID ProviderTeamID) CanonicalTeamID {
@@ -78,6 +79,8 @@ type Game struct {
 	Shootout       bool       `json:"shootout"`
 	FreshAsOf      time.Time  `json:"freshAsOf"`
 	Stale          bool       `json:"stale"`
+	AwayRecord     string     `json:"awayRecord,omitempty"`
+	HomeRecord     string     `json:"homeRecord,omitempty"`
 }
 
 type SportsSnapshot struct {
@@ -86,6 +89,7 @@ type SportsSnapshot struct {
 	DeviceTimezone string     `json:"deviceTimezone"`
 	Games          []Game     `json:"games"`
 	NextGame       *Game      `json:"nextGame,omitempty"`
+	UpcomingGames  []Game     `json:"upcomingGames,omitempty"`
 	FreshAsOf      time.Time  `json:"freshAsOf"`
 	Stale          bool       `json:"stale"`
 }
@@ -94,10 +98,11 @@ type SportsScheduleRequest struct {
 	League   LeagueID
 	TeamID   ProviderTeamID
 	Timezone string
+	Limit    int
 }
 
 func (request SportsScheduleRequest) Validate() error {
-	if request.League != LeagueNHL || strings.TrimSpace(string(request.TeamID)) == "" {
+	if strings.TrimSpace(string(request.League)) == "" || strings.TrimSpace(string(request.TeamID)) == "" {
 		return errors.New("sports schedule request is invalid")
 	}
 	if _, err := time.LoadLocation(request.Timezone); err != nil {
@@ -112,7 +117,7 @@ type SportsLiveRequest struct {
 }
 
 func (request SportsLiveRequest) Validate() error {
-	if request.League != LeagueNHL {
+	if strings.TrimSpace(string(request.League)) == "" {
 		return errors.New("sports live request is invalid")
 	}
 	if _, err := time.LoadLocation(request.Timezone); err != nil {
@@ -128,9 +133,57 @@ type SportsProvider interface {
 }
 
 func SportsUnavailable() error {
-	return SanitizedError{Code: "sports_provider_unavailable", Message: "NHL data is temporarily unavailable", Retryable: true}
+	return SanitizedError{Code: "sports_provider_unavailable", Message: "Sports data is temporarily unavailable", Retryable: true}
 }
 
-func UnknownSportsTeam(teamID ProviderTeamID) error {
-	return SanitizedError{Code: "sports_team_invalid", Message: fmt.Sprintf("NHL team %s is not available", teamID), Retryable: false}
+func UnknownSportsTeam(league LeagueID, _ ProviderTeamID) error {
+	return SanitizedError{Code: "sports_team_invalid", Message: strings.ToUpper(string(league)) + " team selection is not available", Retryable: false}
+}
+
+// SportsRegistry keeps league routing out of rendering and provider adapters.
+// Adding another league does not require a multi-sport provider abstraction or
+// expose one provider's response model to another.
+type SportsRegistry struct {
+	providers map[LeagueID]SportsProvider
+}
+
+func NewSportsRegistry(values map[LeagueID]SportsProvider) *SportsRegistry {
+	providers := make(map[LeagueID]SportsProvider, len(values))
+	for league, provider := range values {
+		if provider != nil {
+			providers[league] = provider
+		}
+	}
+	return &SportsRegistry{providers: providers}
+}
+
+func (registry *SportsRegistry) provider(league LeagueID) (SportsProvider, error) {
+	if registry == nil || registry.providers[league] == nil {
+		return nil, SanitizedError{Code: "sports_league_unsupported", Message: "The sports league is not supported", Retryable: false}
+	}
+	return registry.providers[league], nil
+}
+
+func (registry *SportsRegistry) Teams(ctx context.Context, league LeagueID) ([]Team, error) {
+	provider, err := registry.provider(league)
+	if err != nil {
+		return nil, err
+	}
+	return provider.Teams(ctx, league)
+}
+
+func (registry *SportsRegistry) Schedule(ctx context.Context, request SportsScheduleRequest) (SportsSnapshot, error) {
+	provider, err := registry.provider(request.League)
+	if err != nil {
+		return SportsSnapshot{}, err
+	}
+	return provider.Schedule(ctx, request)
+}
+
+func (registry *SportsRegistry) LiveGames(ctx context.Context, request SportsLiveRequest) (SportsSnapshot, error) {
+	provider, err := registry.provider(request.League)
+	if err != nil {
+		return SportsSnapshot{}, err
+	}
+	return provider.LiveGames(ctx, request)
 }

@@ -128,7 +128,10 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 		PromRegistry:      prometheus.DefaultRegisterer,
 		PromGatherer:      prometheus.DefaultGatherer,
 		diagnosticsEvents: newDeviceEventTimeline(100),
-		SportsProvider:    providers.NewNHLAdapter(nil),
+		SportsProvider: providers.NewSportsRegistry(map[providers.LeagueID]providers.SportsProvider{
+			providers.LeagueNHL: providers.NewNHLAdapter(nil),
+			providers.LeagueCFL: providers.NewESPNAdapter(nil),
+		}),
 	}
 	if cfg.ProviderCredentialMasterKey != "" {
 		store, err := credentials.NewStore(db, cfg.ProviderCredentialMasterKey)

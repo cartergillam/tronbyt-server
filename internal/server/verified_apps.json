@@ -23,7 +23,7 @@
     "verified": false,
     "candidate": true,
     "recommended": false,
-    "compatibilityNotes": "Schedule-selection rewrite passes deterministic fixtures and requires renewed physical approval before verification."
+    "compatibilityNotes": "Candidate using normalized server-managed ESPN CFL data; deterministic fixtures pass and physical approval is still required."
   },
   "quote-of-the-day": {
     "verified": true,

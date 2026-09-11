@@ -1,0 +1,4 @@
+{"events":[
+{"id":"3000","status":{"type":{"state":"in"}},"competitions":[]},
+{"id":"3001","date":"2026-08-06T23:00Z","status":{"period":1,"displayClock":"10:00","type":{"state":"in","name":"STATUS_IN_PROGRESS"}},"competitions":[{"competitors":[{"homeAway":"away","score":"7","team":{"id":"85","abbreviation":"TOR"}},{"homeAway":"home","score":"3","team":{"id":"999","abbreviation":"NEW","displayName":"New Club","color":"not-a-color"}}]}]}
+]}

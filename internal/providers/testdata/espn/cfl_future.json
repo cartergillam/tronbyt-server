@@ -1,0 +1,5 @@
+{"events":[
+{"id":"2002","date":"2026-08-10T23:00Z","status":{"type":{"state":"pre","name":"STATUS_SCHEDULED"}},"competitions":[{"competitors":[{"homeAway":"away","score":"0","team":{"id":"85","abbreviation":"TOR"}},{"homeAway":"home","score":"0","team":{"id":"86","abbreviation":"WPG"}}]}]},
+{"id":"2001","date":"2026-08-08T23:00Z","status":{"type":{"state":"pre","name":"STATUS_SCHEDULED"}},"competitions":[{"competitors":[{"homeAway":"away","score":"0","team":{"id":"79","abbreviation":"BC"}},{"homeAway":"home","score":"0","team":{"id":"85","abbreviation":"TOR"}}]}]},
+{"id":"2003","date":"2026-08-12T23:00Z","status":{"type":{"state":"pre","name":"STATUS_SCHEDULED"}},"competitions":[{"competitors":[{"homeAway":"away","score":"0","team":{"id":"85","abbreviation":"TOR"}},{"homeAway":"home","score":"0","team":{"id":"87","abbreviation":"OTT"}}]}]}
+]}

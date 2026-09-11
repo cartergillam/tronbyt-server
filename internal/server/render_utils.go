@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -185,6 +186,34 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 		}
 		encoded, _ := json.Marshal(snapshot)
 		config["$provider_data"] = string(encoded)
+	case "cfl-scores":
+		if s.SportsProvider == nil {
+			setError(providers.SportsUnavailable())
+			return
+		}
+		timezone := device.GetTimezone()
+		mode, _ := config["scoreMode"].(string)
+		teamID := providerTeamID(config["selectedTeam"])
+		// Existing Auto semantics: a numeric selection follows that team;
+		// All Teams resolves to the league-wide live view.
+		if mode == "league" || teamID == "" || teamID == "all" {
+			snapshot, err := s.SportsProvider.LiveGames(ctx, providers.SportsLiveRequest{League: providers.LeagueCFL, Timezone: timezone})
+			if err != nil {
+				setError(err)
+				return
+			}
+			encoded, _ := json.Marshal(snapshot)
+			config["$sports_data"] = string(encoded)
+			return
+		}
+		limit := providerPositiveInt(config["upcomingGames"], 1, 3)
+		snapshot, err := s.SportsProvider.Schedule(ctx, providers.SportsScheduleRequest{League: providers.LeagueCFL, TeamID: teamID, Timezone: timezone, Limit: limit})
+		if err != nil {
+			setError(err)
+			return
+		}
+		encoded, _ := json.Marshal(snapshot)
+		config["$sports_data"] = string(encoded)
 	}
 }
 
@@ -201,6 +230,27 @@ func providerTeamID(value any) providers.ProviderTeamID {
 	default:
 		return ""
 	}
+}
+
+func providerPositiveInt(value any, fallback, maximum int) int {
+	result := 0
+	switch typed := value.(type) {
+	case string:
+		result, _ = strconv.Atoi(strings.TrimSpace(typed))
+	case float64:
+		result = int(typed)
+	case int:
+		result = typed
+	case int64:
+		result = int(typed)
+	}
+	if result < 1 {
+		return fallback
+	}
+	if result > maximum {
+		return maximum
+	}
+	return result
 }
 
 func providerSymbols(value any) []string {

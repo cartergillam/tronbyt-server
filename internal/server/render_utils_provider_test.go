@@ -162,4 +162,41 @@ func TestManagedNHLProviderErrorsAreSanitized(t *testing.T) {
 	assert.JSONEq(t, `{"code":"sports_response_invalid","message":"NHL data could not be read"}`, config["$provider_error"].(string))
 }
 
+func TestManagedCFLAutoPreservesFavoriteAndAllTeamsSemantics(t *testing.T) {
+	t.Run("numeric auto follows favorite", func(t *testing.T) {
+		provider := &recordingSportsProvider{}
+		config := map[string]any{"scoreMode": "auto", "selectedTeam": "85", "upcomingGames": "3"}
+		(&Server{SportsProvider: provider}).injectManagedProviderData(context.Background(), &data.Device{Timezone: stringPointer("America/Toronto")}, &data.App{Name: "cfl-scores"}, config)
+		require.Len(t, provider.scheduleRequests, 1)
+		assert.Equal(t, providers.LeagueCFL, provider.scheduleRequests[0].League)
+		assert.Equal(t, providers.ProviderTeamID("85"), provider.scheduleRequests[0].TeamID)
+		assert.Equal(t, 3, provider.scheduleRequests[0].Limit)
+		assert.Equal(t, "America/Toronto", provider.scheduleRequests[0].Timezone)
+		assert.Contains(t, config, "$sports_data")
+		assert.NotContains(t, config, "$provider_data")
+	})
+
+	for name, config := range map[string]map[string]any{
+		"all teams auto": {"scoreMode": "auto", "selectedTeam": "all"},
+		"league mode":    {"scoreMode": "league", "selectedTeam": "85"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			provider := &recordingSportsProvider{}
+			(&Server{SportsProvider: provider}).injectManagedProviderData(context.Background(), &data.Device{Timezone: stringPointer("America/Vancouver")}, &data.App{Name: "cfl-scores"}, config)
+			require.Len(t, provider.liveRequests, 1)
+			assert.Equal(t, providers.LeagueCFL, provider.liveRequests[0].League)
+			assert.Equal(t, "America/Vancouver", provider.liveRequests[0].Timezone)
+			assert.Contains(t, config, "$sports_data")
+		})
+	}
+}
+
+func TestManagedCFLErrorsRemainSanitized(t *testing.T) {
+	provider := &recordingSportsProvider{err: providers.SanitizedError{Code: "sports_response_invalid", Message: "CFL data could not be read", Retryable: true}}
+	config := map[string]any{"scoreMode": "favorite", "selectedTeam": 85.0}
+	(&Server{SportsProvider: provider}).injectManagedProviderData(context.Background(), &data.Device{}, &data.App{Name: "cfl-scores"}, config)
+	assert.NotContains(t, config, "$sports_data")
+	assert.JSONEq(t, `{"code":"sports_response_invalid","message":"CFL data could not be read"}`, config["$provider_error"].(string))
+}
+
 func stringPointer(value string) *string { return &value }
