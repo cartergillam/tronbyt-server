@@ -17,6 +17,7 @@ const (
 	LeagueNHL      LeagueID   = "nhl"
 	LeagueCFL      LeagueID   = "cfl"
 	LeagueNBA      LeagueID   = "nba"
+	LeagueNFL      LeagueID   = "nfl"
 	ProviderNHLWeb ProviderID = "nhl-web"
 	ProviderESPN   ProviderID = "espn-site"
 )
@@ -79,6 +80,7 @@ type Game struct {
 	StatusDetail   string     `json:"statusDetail,omitempty"`
 	Overtime       bool       `json:"overtime"`
 	Shootout       bool       `json:"shootout"`
+	Tie            bool       `json:"tie,omitempty"`
 	FreshAsOf      time.Time  `json:"freshAsOf"`
 	Stale          bool       `json:"stale"`
 	AwayRecord     string     `json:"awayRecord,omitempty"`

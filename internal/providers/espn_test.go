@@ -32,9 +32,152 @@ func espnTestAdapter(t *testing.T, handler http.HandlerFunc) *ESPNAdapter {
 	adapter := NewESPNAdapter(client)
 	adapter.BaseURL = "https://espn.test/scoreboard"
 	adapter.NBABaseURL = "https://espn.test/scoreboard"
+	adapter.NFLBaseURL = "https://espn.test/scoreboard"
 	adapter.Cache = NewCache[SportsSnapshot](0)
 	adapter.Now = func() time.Time { return time.Date(2026, 8, 6, 16, 0, 0, 0, time.UTC) }
 	return adapter
+}
+
+func TestNFLFixtureNormalizesStatesRecordsOvertimeAndTie(t *testing.T) {
+	adapter := espnTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write(espnFixture(t, "nfl_states.json"))
+	})
+	games, err := adapter.fetchNFLGames(context.Background(), time.Now(), time.Now())
+	require.NoError(t, err)
+	require.Len(t, games, 17)
+	want := []GameStatus{GameScheduled, GamePregame, GameLive, GameLive, GameIntermission, GameLive, GameLive, GameIntermission, GameLive, GameFinal, GameFinal, GameFinal, GameDelayed, GamePostponed, GameCancelled, GameSuspended, GameUnknown}
+	for index := range want {
+		assert.Equal(t, want[index], games[index].Status, "game %s", games[index].ProviderGameID)
+	}
+	assert.Equal(t, LeagueNFL, games[0].League)
+	assert.Equal(t, CanonicalTeamID("espn-site:nfl:2"), games[0].AwayTeam.ID)
+	assert.Equal(t, "BUF", games[0].AwayTeam.Abbreviation)
+	assert.Equal(t, "8-3", games[0].AwayRecord)
+	assert.Equal(t, "Q1 08:42", games[2].StatusDetail)
+	assert.Equal(t, "HALFTIME", games[4].StatusDetail)
+	assert.Equal(t, "END Q3", games[7].StatusDetail)
+	assert.Equal(t, "OT", games[8].PeriodLabel)
+	assert.Equal(t, "FINAL", games[9].StatusDetail)
+	assert.Equal(t, "FINAL/OT", games[10].StatusDetail)
+	assert.True(t, games[11].Tie)
+	assert.Equal(t, "FINAL/TIE", games[11].StatusDetail)
+	assert.Equal(t, GameUnknown, normalizeNFLStatus("mystery", "STATUS_NEW", "", "", ""))
+}
+
+func TestNFLScheduleUsesDeviceLocalDateAndReturnsFutureGame(t *testing.T) {
+	payload := `{"events":[{"id":"nfl-date","date":"2026-09-11T02:30:00Z","status":{"type":{"state":"pre","name":"STATUS_SCHEDULED"}},"competitions":[{"competitors":[{"homeAway":"away","team":{"id":"2"}},{"homeAway":"home","team":{"id":"17"}}]}]}]}`
+	adapter := espnTestAdapter(t, func(writer http.ResponseWriter, request *http.Request) {
+		assert.Equal(t, "20260909-20261025", request.URL.Query().Get("dates"))
+		_, _ = writer.Write([]byte(payload))
+	})
+	adapter.Now = func() time.Time { return time.Date(2026, 9, 10, 16, 0, 0, 0, time.UTC) }
+	snapshot, err := adapter.Schedule(context.Background(), SportsScheduleRequest{League: LeagueNFL, TeamID: "2", Timezone: "America/Toronto"})
+	require.NoError(t, err)
+	require.Len(t, snapshot.Games, 1)
+	assert.Equal(t, LeagueNFL, snapshot.League)
+	assert.Equal(t, "2026-09-10T22:30:00-04:00", snapshot.Games[0].ScheduledLocal)
+
+	adapter = espnTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) { _, _ = writer.Write([]byte(payload)) })
+	adapter.Now = func() time.Time { return time.Date(2026, 9, 8, 16, 0, 0, 0, time.UTC) }
+	future, err := adapter.Schedule(context.Background(), SportsScheduleRequest{League: LeagueNFL, TeamID: "2", Timezone: "America/Toronto"})
+	require.NoError(t, err)
+	assert.Empty(t, future.Games)
+	require.NotNil(t, future.NextGame)
+	assert.Equal(t, "nfl-date", future.NextGame.ProviderGameID)
+}
+
+func TestNFLLiveGamesHandleSundayClusterWithoutDuplicates(t *testing.T) {
+	payload := `{"events":[
+	{"id":"late","date":"2026-09-13T20:25Z","status":{"period":2,"type":{"state":"in","name":"STATUS_HALFTIME","shortDetail":"Halftime"}},"competitions":[{"competitors":[{"homeAway":"away","team":{"id":"2"}},{"homeAway":"home","team":{"id":"17"}}]}]},
+	{"id":"early","date":"2026-09-13T17:00Z","status":{"period":5,"displayClock":"3:10","type":{"state":"in","name":"STATUS_IN_PROGRESS"}},"competitions":[{"competitors":[{"homeAway":"away","team":{"id":"12"}},{"homeAway":"home","team":{"id":"33"}}]}]},
+	{"id":"early","date":"2026-09-13T17:00Z","status":{"period":5,"type":{"state":"in","name":"STATUS_IN_PROGRESS"}},"competitions":[{"competitors":[{"homeAway":"away","team":{"id":"12"}},{"homeAway":"home","team":{"id":"33"}}]}]}]}`
+	adapter := espnTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) { _, _ = writer.Write([]byte(payload)) })
+	adapter.Now = func() time.Time { return time.Date(2026, 9, 13, 18, 0, 0, 0, time.UTC) }
+	snapshot, err := adapter.LiveGames(context.Background(), SportsLiveRequest{League: LeagueNFL, Timezone: "America/Toronto"})
+	require.NoError(t, err)
+	require.Len(t, snapshot.Games, 2)
+	assert.Equal(t, "early", snapshot.Games[0].ProviderGameID)
+	assert.Equal(t, "OT", snapshot.Games[0].PeriodLabel)
+	assert.Equal(t, GameIntermission, snapshot.Games[1].Status)
+}
+
+func TestNFLZeroClockDoesNotInventFinalState(t *testing.T) {
+	assert.Equal(t, GameLive, normalizeNFLStatus("in", "STATUS_IN_PROGRESS", "", "", "0:00 - 4th Quarter"))
+	assert.Equal(t, GameIntermission, normalizeNFLStatus("in", "STATUS_END_PERIOD", "", "", "End of 3rd Quarter"))
+}
+
+func TestNFLStaleFallbackAndFailureWithoutCache(t *testing.T) {
+	var fail atomic.Bool
+	adapter := espnTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) {
+		if fail.Load() {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = writer.Write(espnFixture(t, "nfl_states.json"))
+	})
+	adapter.Now = func() time.Time { return time.Date(2026, 9, 10, 16, 0, 0, 0, time.UTC) }
+	request := SportsLiveRequest{League: LeagueNFL, Timezone: "UTC"}
+	_, err := adapter.LiveGames(context.Background(), request)
+	require.NoError(t, err)
+	key := "espn:nfl:live:UTC:20260910"
+	adapter.Cache.mu.Lock()
+	entry := adapter.Cache.entries[key]
+	entry.freshUntil = time.Now().Add(-time.Second)
+	entry.staleUntil = time.Now().Add(time.Minute)
+	adapter.Cache.entries[key] = entry
+	adapter.Cache.mu.Unlock()
+	fail.Store(true)
+	stale, err := adapter.LiveGames(context.Background(), request)
+	require.NoError(t, err)
+	assert.True(t, stale.Stale)
+	require.NotEmpty(t, stale.Games)
+	assert.True(t, stale.Games[0].Stale)
+
+	other := espnTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusBadGateway) })
+	_, err = other.LiveGames(context.Background(), request)
+	var sanitized SanitizedError
+	require.ErrorAs(t, err, &sanitized)
+	assert.Equal(t, "sports_provider_unavailable", sanitized.Code)
+}
+
+func TestNFLOffDayMalformedPartialAndCatalogAreSafe(t *testing.T) {
+	adapter := espnTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) { _, _ = writer.Write([]byte(`{"events":[]}`)) })
+	snapshot, err := adapter.LiveGames(context.Background(), SportsLiveRequest{League: LeagueNFL, Timezone: "America/Toronto"})
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Games)
+	policy := espnCachePolicy(snapshot)
+	assert.Equal(t, 20*time.Minute, policy.FreshTTL)
+	assert.Equal(t, 45*time.Minute, policy.StaleTTL)
+
+	adapter = espnTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write(espnFixture(t, "malformed.json"))
+	})
+	_, err = adapter.fetchNFLGames(context.Background(), time.Now(), time.Now())
+	var sanitized SanitizedError
+	require.ErrorAs(t, err, &sanitized)
+	assert.Equal(t, "sports_response_invalid", sanitized.Code)
+
+	adapter = espnTestAdapter(t, func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`{"events":[{"id":"partial"}]}`))
+	})
+	games, err := adapter.fetchNFLGames(context.Background(), time.Now(), time.Now())
+	require.NoError(t, err)
+	assert.Empty(t, games)
+
+	teams, err := adapter.Teams(context.Background(), LeagueNFL)
+	require.NoError(t, err)
+	require.Len(t, teams, 32)
+	seen := map[ProviderTeamID]bool{}
+	for _, team := range teams {
+		assert.False(t, seen[team.ProviderID])
+		seen[team.ProviderID] = true
+		assert.Equal(t, NewCanonicalTeamID(ProviderESPN, LeagueNFL, team.ProviderID), team.ID)
+	}
+	assert.Equal(t, "BUF", nflTeams["2"].Abbreviation)
+	assert.Equal(t, "Washington Commanders", nflTeams["28"].DisplayName)
+	_, err = adapter.Schedule(context.Background(), SportsScheduleRequest{League: LeagueNFL, TeamID: "BUF", Timezone: "UTC"})
+	require.ErrorAs(t, err, &sanitized)
+	assert.Equal(t, "sports_team_invalid", sanitized.Code)
 }
 
 func TestNBAFixtureNormalizesLeagueSpecificStatesAndOvertime(t *testing.T) {

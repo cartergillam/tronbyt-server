@@ -25,13 +25,14 @@ const (
 )
 
 // ESPNAdapter contains the small portion of ESPN's site-scoreboard response
-// shared by CFL and NBA. Endpoint routing and state translation remain
+// shared by CFL, NBA, and NFL. Endpoint routing and state translation remain
 // league-specific; normalized sports data is the only contract exposed to
 // renderers.
 type ESPNAdapter struct {
 	Client     *http.Client
 	BaseURL    string
 	NBABaseURL string
+	NFLBaseURL string
 	Cache      *Cache[SportsSnapshot]
 	Now        func() time.Time
 }
@@ -44,6 +45,7 @@ func NewESPNAdapter(client *http.Client) *ESPNAdapter {
 		Client:     client,
 		BaseURL:    "https://site.api.espn.com/apis/site/v2/sports/football/cfl/scoreboard",
 		NBABaseURL: "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
+		NFLBaseURL: "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
 		Cache:      NewCache[SportsSnapshot](espnMinimumFetchPeriod), Now: time.Now,
 	}
 }
@@ -55,6 +57,8 @@ func (adapter *ESPNAdapter) Teams(_ context.Context, league LeagueID) ([]Team, e
 		catalog = cflTeams
 	case LeagueNBA:
 		catalog = nbaTeams
+	case LeagueNFL:
+		catalog = nflTeams
 	default:
 		return nil, errorsForUnsupportedLeague()
 	}
@@ -72,6 +76,9 @@ func (adapter *ESPNAdapter) Schedule(ctx context.Context, request SportsSchedule
 	}
 	if request.League == LeagueNBA {
 		return adapter.scheduleNBA(ctx, request)
+	}
+	if request.League == LeagueNFL {
+		return adapter.scheduleNFL(ctx, request)
 	}
 	if request.League != LeagueCFL {
 		return SportsSnapshot{}, errorsForUnsupportedLeague()
@@ -126,6 +133,9 @@ func (adapter *ESPNAdapter) LiveGames(ctx context.Context, request SportsLiveReq
 	}
 	if request.League == LeagueNBA {
 		return adapter.liveNBAGames(ctx, request)
+	}
+	if request.League == LeagueNFL {
+		return adapter.liveNFLGames(ctx, request)
 	}
 	if request.League != LeagueCFL {
 		return SportsSnapshot{}, errorsForUnsupportedLeague()

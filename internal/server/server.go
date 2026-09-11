@@ -133,6 +133,7 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 			providers.LeagueNHL: providers.NewNHLAdapter(nil),
 			providers.LeagueCFL: espnSports,
 			providers.LeagueNBA: espnSports,
+			providers.LeagueNFL: espnSports,
 		}),
 	}
 	if cfg.ProviderCredentialMasterKey != "" {
