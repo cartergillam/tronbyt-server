@@ -68,3 +68,25 @@ func TestCredentialScopeIsolationAndMissingMasterKey(t *testing.T) {
 	_, err = NewStore(nil, "")
 	assert.ErrorIs(t, err, ErrMasterKeyUnavailable)
 }
+
+func TestCredentialListDisableEnableAndDelete(t *testing.T) {
+	store, _ := testStore(t)
+	ctx := context.Background()
+	_, err := store.Put(ctx, "weather", "openweather", "server_owner", "owner", "private")
+	require.NoError(t, err)
+	items, err := store.List(ctx, "server_owner", "owner")
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	assert.True(t, items[0].Enabled)
+	disabled, err := store.SetEnabled(ctx, "weather", "server_owner", "owner", false)
+	require.NoError(t, err)
+	assert.False(t, disabled.Enabled)
+	_, err = store.Resolve(ctx, "weather", "server_owner", "owner")
+	assert.ErrorIs(t, err, ErrCredentialDisabled)
+	enabled, err := store.SetEnabled(ctx, "weather", "server_owner", "owner", true)
+	require.NoError(t, err)
+	assert.True(t, enabled.Enabled)
+	require.NoError(t, store.Delete(ctx, "weather", "server_owner", "owner"))
+	_, err = store.Metadata(ctx, "weather", "server_owner", "owner")
+	assert.Error(t, err)
+}

@@ -117,7 +117,7 @@ func TestPhysicalPollingRemainsResponsiveUnderCatalogueLoad(t *testing.T) {
 	go func() {
 		defer workers.Done()
 		for range 20 {
-			_, status := get("/v0/devices/testdevice/diagnostics", "device_api_key")
+			_, status := get("/v0/devices/testdevice/diagnostics", "test_api_key")
 			recordError(status)
 		}
 	}()

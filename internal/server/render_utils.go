@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"tronbyt-server/internal/data"
+	"tronbyt-server/internal/providers"
 	"tronbyt-server/internal/renderer"
 	"tronbyt-server/web"
 
@@ -45,6 +47,9 @@ func (s *Server) RenderApp(ctx context.Context, device *data.Device, app *data.A
 		applyDeviceRenderContext(config, device)
 		locale = device.Locale
 		supports2x = device.Type.Supports2x()
+	}
+	if device != nil && app != nil {
+		s.injectManagedProviderData(ctx, device, app, config)
 	}
 
 	// Dwell Time
@@ -90,6 +95,90 @@ func (s *Server) RenderApp(ctx context.Context, device *data.Device, app *data.A
 		filters,
 		showFullAnimation,
 	)
+}
+
+func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Device, app *data.App, config map[string]any) {
+	credentialID, _ := config["credential_id"].(string)
+	credentialID = strings.TrimSpace(credentialID)
+	if credentialID == "" {
+		return
+	}
+	setError := func(err error) {
+		code := "provider_temporarily_unavailable"
+		message := "Provider data is temporarily unavailable"
+		var sanitized providers.SanitizedError
+		if errors.As(err, &sanitized) {
+			code, message = sanitized.Code, sanitized.Message
+		}
+		encoded, _ := json.Marshal(map[string]any{"code": code, "message": message})
+		config["$provider_error"] = string(encoded)
+	}
+	switch app.Name {
+	case "market-watch":
+		if s.MarketProvider == nil {
+			setError(providers.TemporarilyUnavailable())
+			return
+		}
+		symbols := providerSymbols(config["symbols"])
+		quotes, err := s.MarketProvider.Quotes(ctx, providers.MarketRequest{Symbols: symbols, CredentialID: credentialID, ScopeType: "server_owner", ScopeID: device.Username})
+		if err != nil {
+			setError(err)
+			return
+		}
+		encoded, _ := json.Marshal(quotes)
+		config["$provider_data"] = string(encoded)
+	case "local-weather":
+		if s.WeatherProvider == nil {
+			setError(providers.TemporarilyUnavailable())
+			return
+		}
+		location := providers.Location{Latitude: device.Location.Lat, Longitude: device.Location.Lng, Timezone: device.GetTimezone(), Label: device.Location.Description}
+		if raw, ok := config["custom_location"].(string); ok && strings.TrimSpace(raw) != "" {
+			var custom data.DeviceLocation
+			if json.Unmarshal([]byte(raw), &custom) == nil {
+				location = providers.Location{Latitude: custom.Lat, Longitude: custom.Lng, Timezone: custom.Timezone, Label: custom.Description}
+			}
+		}
+		units, _ := config["units"].(string)
+		if units == "" {
+			units = "metric"
+		}
+		snapshot, err := s.WeatherProvider.Weather(ctx, providers.WeatherRequest{Location: location, Units: units, CredentialID: credentialID, ScopeType: "server_owner", ScopeID: device.Username})
+		if err != nil {
+			setError(err)
+			return
+		}
+		encoded, _ := json.Marshal(snapshot)
+		config["$provider_data"] = string(encoded)
+	}
+}
+
+func providerSymbols(value any) []string {
+	var values []string
+	switch typed := value.(type) {
+	case string:
+		values = strings.FieldsFunc(typed, func(r rune) bool { return r == ',' || r == '\n' })
+	case []string:
+		values = typed
+	case []any:
+		for _, item := range typed {
+			if symbol, ok := item.(string); ok {
+				values = append(values, symbol)
+			}
+		}
+	}
+	result := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		if symbol, err := providers.NormalizeMarketSymbol(value); err == nil {
+			if seen[symbol] {
+				continue
+			}
+			seen[symbol] = true
+			result = append(result, symbol)
+		}
+	}
+	return result
 }
 
 func applyDeviceRenderContext(config map[string]any, device *data.Device) {

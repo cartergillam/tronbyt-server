@@ -22,11 +22,20 @@ import (
 
 type contextKey string
 
+type apiPrincipalKind string
+
+const (
+	apiPrincipalOwner  apiPrincipalKind = "owner"
+	apiPrincipalMember apiPrincipalKind = "household_member"
+	apiPrincipalDevice apiPrincipalKind = "device"
+)
+
 const (
 	userContextKey            contextKey = "user"
 	deviceContextKey          contextKey = "device"
 	appContextKey             contextKey = "app"
 	mobilePrincipalContextKey contextKey = "mobile_principal"
+	apiPrincipalContextKey    contextKey = "api_principal"
 )
 
 // APIAuthMiddleware authenticates requests using the Authorization header (API Key).
@@ -67,6 +76,7 @@ func (s *Server) APIAuthMiddleware(next http.Handler) http.Handler {
 				}
 				ctx := context.WithValue(r.Context(), userContextKey, &user)
 				ctx = context.WithValue(ctx, mobilePrincipalContextKey, &principal)
+				ctx = context.WithValue(ctx, apiPrincipalContextKey, apiPrincipalMember)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -92,6 +102,7 @@ func (s *Server) APIAuthMiddleware(next http.Handler) http.Handler {
 			}
 		} else {
 			ctx := context.WithValue(r.Context(), userContextKey, &user)
+			ctx = context.WithValue(ctx, apiPrincipalContextKey, apiPrincipalOwner)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -119,6 +130,7 @@ func (s *Server) APIAuthMiddleware(next http.Handler) http.Handler {
 			owner.Devices = []data.Device{device}
 			ctx := context.WithValue(r.Context(), userContextKey, &owner)
 			ctx = context.WithValue(ctx, deviceContextKey, &device)
+			ctx = context.WithValue(ctx, apiPrincipalContextKey, apiPrincipalDevice)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -154,12 +166,14 @@ func (s *Server) CatalogueAuthMiddleware(next http.Handler) http.Handler {
 			}
 			ctx := context.WithValue(r.Context(), userContextKey, &user)
 			ctx = context.WithValue(ctx, mobilePrincipalContextKey, &principal)
+			ctx = context.WithValue(ctx, apiPrincipalContextKey, apiPrincipalMember)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 		user, err := gorm.G[data.User](s.DB).Where("api_key = ?", authHeader).First(r.Context())
 		if err == nil {
 			ctx := context.WithValue(r.Context(), userContextKey, &user)
+			ctx = context.WithValue(ctx, apiPrincipalContextKey, apiPrincipalOwner)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -172,16 +186,42 @@ func (s *Server) CatalogueAuthMiddleware(next http.Handler) http.Handler {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		owner, err := gorm.G[data.User](s.DB).Where("username = ?", device.Username).First(r.Context())
-		if err != nil {
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		// Physical-device credentials must never become catalogue/mobile
+		// principals. Returning the same generic denial for every device key
+		// avoids disclosing account or catalogue state.
+		_ = device
+		writeAPIError(w, http.StatusForbidden, "mobile_access_forbidden", "This credential cannot access the mobile API", nil)
+	})
+}
+
+// RequireOwnerAPI is an explicit authorization boundary for account and
+// server administration. It must be composed after APIAuthMiddleware.
+func (s *Server) RequireOwnerAPI(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if principalKindFromContext(r.Context()) != apiPrincipalOwner {
+			writeAPIError(w, http.StatusForbidden, "owner_required", "This operation requires the server owner", nil)
 			return
 		}
-		owner.Devices = []data.Device{device}
-		ctx := context.WithValue(r.Context(), userContextKey, &owner)
-		ctx = context.WithValue(ctx, deviceContextKey, &device)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+		next.ServeHTTP(w, r)
+	}
+}
+
+// RequireMobileControlAPI permits owner and household-member mobile sessions,
+// but categorically rejects physical-device API keys.
+func (s *Server) RequireMobileControlAPI(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		kind := principalKindFromContext(r.Context())
+		if kind != apiPrincipalOwner && kind != apiPrincipalMember {
+			writeAPIError(w, http.StatusForbidden, "mobile_access_forbidden", "This credential cannot access the mobile API", nil)
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
+func principalKindFromContext(ctx context.Context) apiPrincipalKind {
+	kind, _ := ctx.Value(apiPrincipalContextKey).(apiPrincipalKind)
+	return kind
 }
 
 // RequireLogin authenticates Web UI requests via session cookie.

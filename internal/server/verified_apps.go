@@ -16,6 +16,7 @@ var verifiedAppsJSON []byte
 
 type verifiedAppMetadata struct {
 	Verified                       bool           `json:"verified"`
+	Candidate                      bool           `json:"candidate,omitempty"`
 	Recommended                    bool           `json:"recommended"`
 	VerifiedVersion                string         `json:"verifiedVersion"`
 	VerificationDate               string         `json:"verificationDate"`
@@ -31,7 +32,7 @@ func mustLoadVerifiedAppsManifest() map[string]verifiedAppMetadata {
 		panic(fmt.Sprintf("decode embedded verified-app manifest: %v", err))
 	}
 	for id, metadata := range manifest {
-		if id == "" || !metadata.Verified || metadata.VerifiedVersion == "" || metadata.VerificationDate == "" {
+		if id == "" || (!metadata.Verified && !metadata.Candidate) || (metadata.Verified && (metadata.VerifiedVersion == "" || metadata.VerificationDate == "")) {
 			panic("verified-app manifest contains an incomplete entry")
 		}
 	}
@@ -59,6 +60,6 @@ var verifiedStarterBundles = map[string]starterBundle{
 		ID: "verified-starter", Name: "Verified Starter Apps",
 		// MLB requires an explicit team choice and is therefore verified but not
 		// safe for unattended bundle installation.
-		AppIDs: []string{"og-clock", "cfl-scores", "quote-of-the-day"},
+		AppIDs: []string{"og-clock", "quote-of-the-day"},
 	},
 }

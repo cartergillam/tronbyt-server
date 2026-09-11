@@ -73,3 +73,19 @@ func TestPairingCodeExpirationAndOwnerBoundary(t *testing.T) {
 	_, err = service.Redeem(ctx, code, time.Hour)
 	assert.ErrorIs(t, err, ErrCodeInvalid)
 }
+
+func TestMemberListingAndAtomicDeviceReassignment(t *testing.T) {
+	service, db := testService(t)
+	require.NoError(t, db.Create(&data.Device{ID: "display-a2", Username: "owner-a", APIKey: "device-a2"}).Error)
+	member, err := service.CreateMember(t.Context(), "owner-a", "Member", []string{"display-a"})
+	require.NoError(t, err)
+	summary, err := service.UpdateAssignments(t.Context(), "owner-a", member.ID, []string{"display-a2"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"display-a2"}, summary.DeviceIDs)
+	_, err = service.UpdateAssignments(t.Context(), "owner-a", member.ID, []string{"display-b"})
+	assert.ErrorIs(t, err, ErrForbidden)
+	members, err := service.ListMembers(t.Context(), "owner-a")
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	assert.Equal(t, []string{"display-a2"}, members[0].DeviceIDs, "failed reassignment must not alter the allowlist")
+}

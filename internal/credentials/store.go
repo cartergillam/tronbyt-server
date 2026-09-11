@@ -22,6 +22,7 @@ var (
 	ErrMasterKeyUnavailable = errors.New("provider credential master key is unavailable")
 	ErrScopeMismatch        = errors.New("provider credential scope mismatch")
 	ErrCredentialMissing    = errors.New("provider credential is missing")
+	ErrCredentialDisabled   = errors.New("provider credential is disabled")
 )
 
 type Metadata struct {
@@ -33,6 +34,8 @@ type Metadata struct {
 	ValidationState string     `json:"validationState"`
 	ValidatedAt     *time.Time `json:"validatedAt,omitempty"`
 	LastUsedAt      *time.Time `json:"lastUsedAt,omitempty"`
+	DisabledAt      *time.Time `json:"disabledAt,omitempty"`
+	Enabled         bool       `json:"enabled"`
 }
 
 type Store struct {
@@ -64,6 +67,13 @@ func decodeMasterKey(value string) ([]byte, error) {
 	decoders := []func(string) ([]byte, error){base64.StdEncoding.DecodeString, base64.RawStdEncoding.DecodeString, hex.DecodeString}
 	for _, decode := range decoders {
 		if key, err := decode(value); err == nil && len(key) == 32 {
+			unique := map[byte]bool{}
+			for _, item := range key {
+				unique[item] = true
+			}
+			if len(unique) < 8 {
+				return nil, errors.New("PROVIDER_CREDENTIAL_MASTER_KEY must be randomly generated, not a placeholder")
+			}
 			return key, nil
 		}
 	}
@@ -98,6 +108,7 @@ func (s *Store) Put(ctx context.Context, id, provider, scopeType, scopeID, secre
 	record.ID, record.Provider, record.ScopeType, record.ScopeID = id, provider, scopeType, scopeID
 	record.Ciphertext, record.Nonce, record.KeyVersion = ciphertext, nonce, version
 	record.ValidationState, record.ValidatedAt = "unvalidated", nil
+	record.DisabledAt = nil
 	if err := s.db.WithContext(ctx).Save(&record).Error; err != nil {
 		return Metadata{}, err
 	}
@@ -117,6 +128,9 @@ func (s *Store) Resolve(ctx context.Context, id, scopeType, scopeID string) (str
 	}
 	if record.ScopeType != scopeType || record.ScopeID != scopeID {
 		return "", ErrScopeMismatch
+	}
+	if record.DisabledAt != nil {
+		return "", ErrCredentialDisabled
 	}
 	plaintext, err := s.aead.Open(nil, record.Nonce, record.Ciphertext, credentialAAD(record.ID, record.Provider, record.ScopeType, record.ScopeID, record.KeyVersion))
 	if err != nil {
@@ -150,11 +164,52 @@ func (s *Store) Metadata(ctx context.Context, id, scopeType, scopeID string) (Me
 	return metadata(record), nil
 }
 
+func (s *Store) List(ctx context.Context, scopeType, scopeID string) ([]Metadata, error) {
+	var records []data.ProviderCredential
+	if err := s.db.WithContext(ctx).Where("scope_type = ? AND scope_id = ?", scopeType, scopeID).Order("provider ASC, id ASC").Find(&records).Error; err != nil {
+		return nil, err
+	}
+	result := make([]Metadata, 0, len(records))
+	for _, record := range records {
+		result = append(result, metadata(record))
+	}
+	return result, nil
+}
+
+func (s *Store) SetEnabled(ctx context.Context, id, scopeType, scopeID string, enabled bool) (Metadata, error) {
+	var record data.ProviderCredential
+	if err := s.db.WithContext(ctx).Where("id = ? AND scope_type = ? AND scope_id = ?", id, scopeType, scopeID).First(&record).Error; err != nil {
+		return Metadata{}, ErrCredentialMissing
+	}
+	var disabledAt *time.Time
+	if !enabled {
+		now := time.Now().UTC()
+		disabledAt = &now
+	}
+	if err := s.db.WithContext(ctx).Model(&data.ProviderCredential{ID: record.ID}).Update("disabled_at", disabledAt).Error; err != nil {
+		return Metadata{}, err
+	}
+	record.DisabledAt = disabledAt
+	return metadata(record), nil
+}
+
+func (s *Store) Delete(ctx context.Context, id, scopeType, scopeID string) error {
+	result := s.db.WithContext(ctx).Where("id = ? AND scope_type = ? AND scope_id = ?", id, scopeType, scopeID).Delete(&data.ProviderCredential{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrCredentialMissing
+	}
+	return nil
+}
+
 func metadata(record data.ProviderCredential) Metadata {
 	return Metadata{
 		ID: record.ID, Provider: record.Provider, ScopeType: record.ScopeType, ScopeID: record.ScopeID,
 		KeyVersion: record.KeyVersion, ValidationState: record.ValidationState,
 		ValidatedAt: record.ValidatedAt, LastUsedAt: record.LastUsedAt,
+		DisabledAt: record.DisabledAt, Enabled: record.DisabledAt == nil,
 	}
 }
 

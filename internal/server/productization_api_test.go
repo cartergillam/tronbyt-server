@@ -150,3 +150,75 @@ func TestProviderCredentialRoutesNeverReturnSecretAndRejectMemberOrDeviceScopeEs
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Contains(t, recorder.Body.String(), `"keyVersion":2`)
 }
+
+func TestDeviceCredentialIsForbiddenFromEveryMobileAdministrationSurface(t *testing.T) {
+	s := newTestServerAPI(t)
+	configureProductizationServices(t, s)
+	tests := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/v0/capabilities", ""},
+		{http.MethodGet, "/v0/catalogue", ""},
+		{http.MethodGet, "/v0/devices", ""},
+		{http.MethodGet, "/v0/devices/testdevice", ""},
+		{http.MethodPatch, "/v0/devices/testdevice", `{}`},
+		{http.MethodPost, "/v0/devices/testdevice/installations", `{}`},
+		{http.MethodPost, "/v0/household/members", `{}`},
+		{http.MethodGet, "/v0/household/members", ""},
+		{http.MethodPatch, "/v0/household/members/member", `{}`},
+		{http.MethodPost, "/v0/household/members/member/pairing-codes", `{}`},
+		{http.MethodDelete, "/v0/mobile-sessions/session", ""},
+		{http.MethodGet, "/v0/provider-credentials", ""},
+		{http.MethodGet, "/v0/provider-credentials/existing", ""},
+		{http.MethodPut, "/v0/provider-credentials/existing", `{}`},
+		{http.MethodPatch, "/v0/provider-credentials/existing", `{}`},
+		{http.MethodDelete, "/v0/provider-credentials/existing", ""},
+		{http.MethodPost, "/v0/provider-credentials/existing/validate", ""},
+		{http.MethodPost, "/v0/devices/testdevice/starter-bundles/verified-starter", ""},
+	}
+	for _, test := range tests {
+		t.Run(test.method+" "+test.path, func(t *testing.T) {
+			request := newAPIRequest(test.method, test.path, "device_api_key", []byte(test.body))
+			recorder := httptest.NewRecorder()
+			s.ServeHTTP(recorder, request)
+			assert.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
+			assert.NotContains(t, recorder.Body.String(), "existing")
+		})
+	}
+}
+
+func TestOwnerCredentialLifecycleListDisableEnableAndDelete(t *testing.T) {
+	s := newTestServerAPI(t)
+	configureProductizationServices(t, s)
+	request := newAPIRequest(http.MethodPut, "/v0/provider-credentials/weather-primary", "test_api_key", []byte(`{"provider":"openweather","secret":"never-return-this"}`))
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.NotContains(t, recorder.Body.String(), "never-return-this")
+
+	request = newAPIRequest(http.MethodGet, "/v0/provider-credentials", "test_api_key", nil)
+	recorder = httptest.NewRecorder()
+	s.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.Contains(t, recorder.Body.String(), `"id":"weather-primary"`)
+	assert.NotContains(t, recorder.Body.String(), "never-return-this")
+
+	request = newAPIRequest(http.MethodPatch, "/v0/provider-credentials/weather-primary", "test_api_key", []byte(`{"enabled":false}`))
+	recorder = httptest.NewRecorder()
+	s.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.Contains(t, recorder.Body.String(), `"enabled":false`)
+
+	request = newAPIRequest(http.MethodPatch, "/v0/provider-credentials/weather-primary", "test_api_key", []byte(`{"enabled":true}`))
+	recorder = httptest.NewRecorder()
+	s.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.Contains(t, recorder.Body.String(), `"enabled":true`)
+
+	request = newAPIRequest(http.MethodDelete, "/v0/provider-credentials/weather-primary", "test_api_key", nil)
+	recorder = httptest.NewRecorder()
+	s.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+}

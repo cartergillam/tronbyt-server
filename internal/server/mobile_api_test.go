@@ -132,7 +132,7 @@ func TestMobilePreviewAndETag(t *testing.T) {
 	image := []byte("RIFF-fake-animated-webp")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "test-100.webp"), image, 0644))
 
-	req := newAPIRequest(http.MethodGet, "/v0/devices/testdevice/preview", "device_api_key", nil)
+	req := newAPIRequest(http.MethodGet, "/v0/devices/testdevice/preview", "test_api_key", nil)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -141,7 +141,7 @@ func TestMobilePreviewAndETag(t *testing.T) {
 	etag := rr.Header().Get("ETag")
 	require.NotEmpty(t, etag)
 
-	req = newAPIRequest(http.MethodGet, "/v0/devices/testdevice/preview", "device_api_key", nil)
+	req = newAPIRequest(http.MethodGet, "/v0/devices/testdevice/preview", "test_api_key", nil)
 	req.Header.Set("If-None-Match", etag)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -157,7 +157,7 @@ func TestMobilePreviewAuthorizationAndMissing(t *testing.T) {
 	}{
 		{name: "missing key", status: http.StatusUnauthorized},
 		{name: "invalid key", key: "wrong", status: http.StatusUnauthorized},
-		{name: "authorized but no preview", key: "device_api_key", status: http.StatusNotFound},
+		{name: "authorized but no preview", key: "test_api_key", status: http.StatusNotFound},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/v0/devices/testdevice/preview", nil)
@@ -182,14 +182,14 @@ func TestInstallationPreviewIsScopedToRealInstallation(t *testing.T) {
 	content := []byte("RIFF-installation-preview")
 	require.NoError(t, os.WriteFile(s.getAppWebpPath(dir, &app), content, 0o644))
 
-	req := newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations/clock-main/preview", "device_api_key", nil)
+	req := newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations/clock-main/preview", "test_api_key", nil)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, content, rr.Body.Bytes())
 	assert.NotEmpty(t, rr.Header().Get("ETag"))
 
-	req = newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations/missing/preview", "device_api_key", nil)
+	req = newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations/missing/preview", "test_api_key", nil)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusNotFound, rr.Code)
@@ -199,15 +199,20 @@ func TestCapabilitiesDetectAuthorizationScope(t *testing.T) {
 	s := newTestServerAPI(t)
 	for _, test := range []struct {
 		name, key, scope string
+		status           int
 	}{
-		{name: "device key", key: "device_api_key", scope: "device"},
-		{name: "user key", key: "test_api_key", scope: "user"},
+		{name: "device key", key: "device_api_key", status: http.StatusForbidden},
+		{name: "user key", key: "test_api_key", scope: "user", status: http.StatusOK},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			req := newAPIRequest(http.MethodGet, "/v0/capabilities", test.key, nil)
 			rr := httptest.NewRecorder()
 			s.ServeHTTP(rr, req)
-			require.Equal(t, http.StatusOK, rr.Code)
+			require.Equal(t, test.status, rr.Code)
+			if test.status != http.StatusOK {
+				assert.Contains(t, rr.Body.String(), "mobile_access_forbidden")
+				return
+			}
 			var payload capabilityResponse
 			require.NoError(t, json.NewDecoder(rr.Body).Decode(&payload))
 			assert.Equal(t, test.scope, payload.AuthorizationScope)
@@ -228,7 +233,7 @@ func TestDeviceDiagnosticsAreScopedAndSanitized(t *testing.T) {
 	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &app))
 	s.diagnosticsEvents.add("testdevice", "render_failure", "token=secret-value", app.Iname)
 
-	req := newAPIRequest(http.MethodGet, "/v0/devices/testdevice/diagnostics", "device_api_key", nil)
+	req := newAPIRequest(http.MethodGet, "/v0/devices/testdevice/diagnostics", "test_api_key", nil)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -241,7 +246,7 @@ func TestDeviceDiagnosticsAreScopedAndSanitized(t *testing.T) {
 
 	other := data.Device{ID: "otherdevice", Username: "otheruser", Name: "Other", APIKey: "other_key"}
 	require.NoError(t, gorm.G[data.Device](s.DB).Create(ctx, &other))
-	req = newAPIRequest(http.MethodGet, "/v0/devices/otherdevice/diagnostics", "device_api_key", nil)
+	req = newAPIRequest(http.MethodGet, "/v0/devices/otherdevice/diagnostics", "test_api_key", nil)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusNotFound, rr.Code)
@@ -255,11 +260,8 @@ func TestDeviceKeyListsOnlyAuthorizedDevice(t *testing.T) {
 	req := newAPIRequest(http.MethodGet, "/v0/devices", "device_api_key", nil)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
-	require.Equal(t, http.StatusOK, rr.Code)
-	var payload ListDevicesPayload
-	require.NoError(t, json.NewDecoder(rr.Body).Decode(&payload))
-	require.Len(t, payload.Devices, 1)
-	assert.Equal(t, "testdevice", payload.Devices[0].ID)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), "mobile_access_forbidden")
 }
 
 func TestInstalledAppsExcludeTemporaryPushedContent(t *testing.T) {
@@ -274,7 +276,7 @@ func TestInstalledAppsExcludeTemporaryPushedContent(t *testing.T) {
 		require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &appsToCreate[i]))
 	}
 
-	req := newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations", "device_api_key", nil)
+	req := newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations", "test_api_key", nil)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -282,7 +284,7 @@ func TestInstalledAppsExcludeTemporaryPushedContent(t *testing.T) {
 	assert.NotContains(t, rr.Body.String(), `"id":"102"`)
 	assert.Contains(t, rr.Body.String(), `"lastRenderAt":null`)
 
-	req = newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations/102", "device_api_key", nil)
+	req = newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations/102", "test_api_key", nil)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusNotFound, rr.Code)
@@ -308,7 +310,7 @@ func TestLegacyBrightnessPowerOnRestoresNormalRotationAndNeverPushedContent(t *t
 	})
 	require.NoError(t, err)
 
-	req := newAPIRequest(http.MethodPatch, "/v0/devices/testdevice", "device_api_key", []byte(`{"brightness":0}`))
+	req := newAPIRequest(http.MethodPatch, "/v0/devices/testdevice", "test_api_key", []byte(`{"brightness":0}`))
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -318,7 +320,7 @@ func TestLegacyBrightnessPowerOnRestoresNormalRotationAndNeverPushedContent(t *t
 	assert.Equal(t, "weather", *device.DisplayRestoreApp)
 	assert.Nil(t, device.DisplayingApp)
 
-	req = newAPIRequest(http.MethodPatch, "/v0/devices/testdevice", "device_api_key", []byte(`{"brightness":70}`))
+	req = newAPIRequest(http.MethodPatch, "/v0/devices/testdevice", "test_api_key", []byte(`{"brightness":70}`))
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -350,7 +352,7 @@ func TestCatalogueListingFiltersAndPagination(t *testing.T) {
 	require.NoError(t, os.MkdirAll(customDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(customDir, "custom-clock.star"), []byte("def main(config):\n    return []\n"), 0644))
 
-	req := newAPIRequest(http.MethodGet, "/v0/catalogue?category=sports&limit=1&offset=0", "device_api_key", nil)
+	req := newAPIRequest(http.MethodGet, "/v0/catalogue?category=sports&limit=1&offset=0", "test_api_key", nil)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -363,14 +365,14 @@ func TestCatalogueListingFiltersAndPagination(t *testing.T) {
 	assert.Equal(t, "mlb", payload.Apps[0].ID)
 	assert.Equal(t, 1, payload.Total)
 
-	req = newAPIRequest(http.MethodGet, "/v0/catalogue?search=baseball", "device_api_key", nil)
+	req = newAPIRequest(http.MethodGet, "/v0/catalogue?search=baseball", "test_api_key", nil)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Contains(t, rr.Body.String(), `"id":"mlb"`)
 	assert.NotContains(t, rr.Body.String(), `"id":"clock"`)
 
-	req = newAPIRequest(http.MethodGet, "/v0/catalogue?repository=custom-repository", "device_api_key", nil)
+	req = newAPIRequest(http.MethodGet, "/v0/catalogue?repository=custom-repository", "test_api_key", nil)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code)
@@ -403,7 +405,7 @@ def get_schema():
 		"installed only": "/v0/catalogue?installed=true&deviceID=testdevice",
 	} {
 		t.Run(name, func(t *testing.T) {
-			req := newAPIRequest(http.MethodGet, target, "device_api_key", nil)
+			req := newAPIRequest(http.MethodGet, target, "test_api_key", nil)
 			rr := httptest.NewRecorder()
 			s.ServeHTTP(rr, req)
 			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -414,7 +416,7 @@ def get_schema():
 		})
 	}
 
-	req := newAPIRequest(http.MethodGet, "/v0/catalogue/og-clock", "device_api_key", nil)
+	req := newAPIRequest(http.MethodGet, "/v0/catalogue/og-clock", "test_api_key", nil)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -434,14 +436,14 @@ func TestCatalogueIconCachingAndDecodeLimits(t *testing.T) {
 		{Manifest: apps.Manifest{ID: "broken-icon", Name: "Broken Icon"}, Path: "system-apps/apps/icon-test/broken-icon.star", Preview: "broken.png"},
 	}
 
-	req := newAPIRequest(http.MethodGet, "/v0/catalogue/icon-test/icon", "device_api_key", nil)
+	req := newAPIRequest(http.MethodGet, "/v0/catalogue/icon-test/icon", "test_api_key", nil)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.NotEmpty(t, rr.Header().Get("ETag"))
 	assert.Contains(t, rr.Header().Get("Cache-Control"), "stale-while-revalidate")
 
-	req = newAPIRequest(http.MethodGet, "/v0/catalogue/broken-icon/icon", "device_api_key", nil)
+	req = newAPIRequest(http.MethodGet, "/v0/catalogue/broken-icon/icon", "test_api_key", nil)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
@@ -493,7 +495,7 @@ func TestInstallationCreateConfigAndDuplicate(t *testing.T) {
 		"displayTimeSec":15,
 		"renderIntervalMin":5
 	}`)
-	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "device_api_key", createBody)
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "test_api_key", createBody)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
@@ -507,19 +509,19 @@ func TestInstallationCreateConfigAndDuplicate(t *testing.T) {
 	assert.Equal(t, true, created.Config["enabled"])
 
 	configURL := fmt.Sprintf("/v0/devices/testdevice/installations/%s/config", created.Installation.ID)
-	req = newAPIRequest(http.MethodPatch, configURL, "device_api_key", []byte(`{"config":{"enabled":false}}`))
+	req = newAPIRequest(http.MethodPatch, configURL, "test_api_key", []byte(`{"config":{"enabled":false}}`))
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	assert.Contains(t, rr.Body.String(), `"enabled":false`)
 
-	req = newAPIRequest(http.MethodPatch, configURL, "device_api_key", []byte(`{"config":{"unknown":true}}`))
+	req = newAPIRequest(http.MethodPatch, configURL, "test_api_key", []byte(`{"config":{"unknown":true}}`))
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
 	assert.Contains(t, rr.Body.String(), `"unknown":"unknown configuration field"`)
 
-	req = newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "device_api_key", createBody)
+	req = newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "test_api_key", createBody)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusConflict, rr.Code)
@@ -534,7 +536,7 @@ func TestInstallationCreateIdempotentRetryUsesMutationID(t *testing.T) {
 		"mutationID":"install-retry-001"
 	}`)
 	request := func(payload []byte) *httptest.ResponseRecorder {
-		req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "device_api_key", payload)
+		req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "test_api_key", payload)
 		rr := httptest.NewRecorder()
 		s.ServeHTTP(rr, req)
 		return rr
@@ -567,13 +569,13 @@ func TestInstallationCreateRejectsInvalidAppAndForeignDevice(t *testing.T) {
 	require.NoError(t, gorm.G[data.Device](s.DB).Create(context.Background(), &other))
 
 	body := []byte(`{"appID":"missing","config":{},"enabled":true,"displayTimeSec":15,"renderIntervalMin":5}`)
-	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "device_api_key", body)
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "test_api_key", body)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 
 	body = []byte(`{"appID":"mobiletest","config":{"enabled":true},"enabled":true,"displayTimeSec":15,"renderIntervalMin":5}`)
-	req = newAPIRequest(http.MethodPost, "/v0/devices/otherdevice/installations", "device_api_key", body)
+	req = newAPIRequest(http.MethodPost, "/v0/devices/otherdevice/installations", "test_api_key", body)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusNotFound, rr.Code)
@@ -598,7 +600,7 @@ def get_schema():
 	}}
 
 	body := []byte(`{"appID":"broken-render","config":{},"enabled":true,"displayTimeSec":15,"renderIntervalMin":5}`)
-	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "device_api_key", body)
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "test_api_key", body)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
@@ -647,7 +649,7 @@ def get_schema():
 	// Sanitized production-equivalent request: the app inherits the device's
 	// Caledonia coordinate and uses its default Fahrenheit setting.
 	body := []byte(`{"appID":"nws-daily-forecast","config":{},"enabled":true,"displayTimeSec":15,"renderIntervalMin":60,"mutationID":"nws-caledonia-001"}`)
-	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "device_api_key", body)
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/installations", "test_api_key", body)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
@@ -664,7 +666,7 @@ def get_schema():
 	assert.Contains(t, response.Render.Message, "requires a U.S. location")
 	assert.False(t, response.Render.PreviewAvailable)
 
-	req = newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations/"+response.Installation.ID+"/preview", "device_api_key", nil)
+	req = newAPIRequest(http.MethodGet, "/v0/devices/testdevice/installations/"+response.Installation.ID+"/preview", "test_api_key", nil)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusFailedDependency, rr.Code, rr.Body.String())
@@ -692,7 +694,7 @@ func TestInstallationOrderingValidationAndSuccess(t *testing.T) {
 		"foreign":   `{"installationIDs":["100","200","999"]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			req := newAPIRequest(http.MethodPatch, "/v0/devices/testdevice/installations/order", "device_api_key", []byte(body))
+			req := newAPIRequest(http.MethodPatch, "/v0/devices/testdevice/installations/order", "test_api_key", []byte(body))
 			rr := httptest.NewRecorder()
 			s.ServeHTTP(rr, req)
 			assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
@@ -702,7 +704,7 @@ func TestInstallationOrderingValidationAndSuccess(t *testing.T) {
 		})
 	}
 
-	req := newAPIRequest(http.MethodPatch, "/v0/devices/testdevice/installations/order", "device_api_key",
+	req := newAPIRequest(http.MethodPatch, "/v0/devices/testdevice/installations/order", "test_api_key",
 		[]byte(`{"installationIDs":["300","100","200"]}`))
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -731,13 +733,13 @@ func TestInstallationOrderingRejectsTemporaryPushedIDsButDoesNotRequireThem(t *t
 		require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &app))
 	}
 
-	req := newAPIRequest(http.MethodPatch, "/v0/devices/testdevice/installations/order", "device_api_key",
+	req := newAPIRequest(http.MethodPatch, "/v0/devices/testdevice/installations/order", "test_api_key",
 		[]byte(`{"installationIDs":["200","100"]}`))
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	req = newAPIRequest(http.MethodPatch, "/v0/devices/testdevice/installations/order", "device_api_key",
+	req = newAPIRequest(http.MethodPatch, "/v0/devices/testdevice/installations/order", "test_api_key",
 		[]byte(`{"installationIDs":["999","100"]}`))
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -752,7 +754,7 @@ func TestTemporaryPushedInstallationCannotBeDeleted(t *testing.T) {
 	app := data.App{DeviceID: "testdevice", Iname: "999", Name: "pushed", Path: &path, Pushed: true, Enabled: true}
 	require.NoError(t, gorm.G[data.App](s.DB).Create(ctx, &app))
 
-	req := newAPIRequest(http.MethodDelete, "/v0/devices/testdevice/installations/999", "device_api_key", nil)
+	req := newAPIRequest(http.MethodDelete, "/v0/devices/testdevice/installations/999", "test_api_key", nil)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
@@ -777,7 +779,7 @@ func TestDeletingPinnedAndDisplayedInstallationClearsDeviceReferences(t *testing
 		})
 	require.NoError(t, err)
 
-	req := newAPIRequest(http.MethodDelete, "/v0/devices/testdevice/installations/clock", "device_api_key", nil)
+	req := newAPIRequest(http.MethodDelete, "/v0/devices/testdevice/installations/clock", "test_api_key", nil)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())

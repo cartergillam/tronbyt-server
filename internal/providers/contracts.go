@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -33,6 +34,18 @@ type MarketQuote struct {
 type MarketRequest struct {
 	Symbols      []string
 	CredentialID string
+	ScopeType    string
+	ScopeID      string
+}
+
+var marketSymbolPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9.-]{0,14}(:[A-Z0-9][A-Z0-9.-]{0,14})?$`)
+
+func NormalizeMarketSymbol(value string) (string, error) {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	if !marketSymbolPattern.MatchString(value) {
+		return "", errors.New("market symbol is invalid")
+	}
+	return value, nil
 }
 
 func (request MarketRequest) Validate() error {
@@ -41,8 +54,9 @@ func (request MarketRequest) Validate() error {
 	}
 	seen := map[string]bool{}
 	for _, symbol := range request.Symbols {
-		symbol = strings.ToUpper(strings.TrimSpace(symbol))
-		if symbol == "" || len(symbol) > 16 || seen[symbol] {
+		var err error
+		symbol, err = NormalizeMarketSymbol(symbol)
+		if err != nil || seen[symbol] {
 			return errors.New("market symbols must be unique and valid")
 		}
 		seen[symbol] = true
@@ -65,6 +79,18 @@ type WeatherRequest struct {
 	Location     Location
 	Units        string
 	CredentialID string
+	ScopeType    string
+	ScopeID      string
+}
+
+func (request WeatherRequest) Validate() error {
+	if request.Location.Latitude < -90 || request.Location.Latitude > 90 || request.Location.Longitude < -180 || request.Location.Longitude > 180 {
+		return errors.New("weather location is invalid")
+	}
+	if request.Units != "metric" && request.Units != "imperial" {
+		return errors.New("weather units must be metric or imperial")
+	}
+	return nil
 }
 
 type WeatherCondition struct {
@@ -103,6 +129,14 @@ type WeatherSnapshot struct {
 
 type WeatherProvider interface {
 	Weather(context.Context, WeatherRequest) (WeatherSnapshot, error)
+}
+
+type CredentialResolver interface {
+	Resolve(context.Context, string, string, string) (string, error)
+}
+
+type CredentialValidator interface {
+	ValidateCredential(context.Context, string, string, string) error
 }
 
 type SanitizedError struct {

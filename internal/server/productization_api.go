@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"tronbyt-server/internal/data"
+	"tronbyt-server/internal/providers"
 	"tronbyt-server/internal/provisioning"
 
 	"gorm.io/gorm"
@@ -153,8 +154,12 @@ func (s *Server) handleRedeemPairingCode(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleRevokeMobileSession(w http.ResponseWriter, r *http.Request) {
 	owner, err := requireOwnerMobileAPI(r)
-	if err != nil || s.Provisioning == nil {
+	if err != nil {
 		writeAPIError(w, http.StatusForbidden, "owner_required", "Only the server owner can revoke member sessions", nil)
+		return
+	}
+	if s.Provisioning == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "pairing_unavailable", "Household pairing is not configured", nil)
 		return
 	}
 	if err := s.Provisioning.Revoke(r.Context(), owner.Username, r.PathValue("sessionID")); err != nil {
@@ -162,6 +167,42 @@ func (s *Server) handleRevokeMobileSession(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListHouseholdMembers(w http.ResponseWriter, r *http.Request) {
+	owner, _ := requireOwnerMobileAPI(r)
+	if s.Provisioning == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "pairing_unavailable", "Household pairing is not configured", nil)
+		return
+	}
+	members, err := s.Provisioning.ListMembers(r.Context(), owner.Username)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "members_unavailable", "Household members could not be loaded", nil)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"members": members})
+}
+
+func (s *Server) handlePatchHouseholdMember(w http.ResponseWriter, r *http.Request) {
+	owner, _ := requireOwnerMobileAPI(r)
+	if s.Provisioning == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "pairing_unavailable", "Household pairing is not configured", nil)
+		return
+	}
+	var request struct {
+		DeviceIDs []string `json:"deviceIDs"`
+	}
+	if !decodeAPIJSON(w, r, &request) {
+		return
+	}
+	member, err := s.Provisioning.UpdateAssignments(r.Context(), owner.Username, r.PathValue("memberID"), request.DeviceIDs)
+	if err != nil {
+		writeAPIError(w, http.StatusUnprocessableEntity, "member_update_failed", "The member could not be assigned to those devices", nil)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(member)
 }
 
 func (s *Server) handlePutProviderCredential(w http.ResponseWriter, r *http.Request) {
@@ -184,6 +225,9 @@ func (s *Server) handlePutProviderCredential(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	request.Provider = strings.ToLower(strings.TrimSpace(request.Provider))
+	if request.ScopeType == "" {
+		request.ScopeType, request.ScopeID = "server_owner", owner.Username
+	}
 	if !providerNamePattern.MatchString(request.Provider) || !s.ownerControlsCredentialScope(r, owner, request.ScopeType, request.ScopeID) {
 		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_credential_scope", "The provider or credential scope is invalid", nil)
 		return
@@ -217,6 +261,121 @@ func (s *Server) handleGetProviderCredentialMetadata(w http.ResponseWriter, r *h
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(metadata)
+}
+
+func (s *Server) handleListProviderCredentials(w http.ResponseWriter, r *http.Request) {
+	owner, _ := requireOwnerMobileAPI(r)
+	if s.CredentialStore == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "credential_store_unavailable", "Provider credential encryption is not configured", nil)
+		return
+	}
+	scopeType, scopeID := credentialScopeQuery(r, owner)
+	if !s.ownerControlsCredentialScope(r, owner, scopeType, scopeID) {
+		writeAPIError(w, http.StatusForbidden, "credential_scope_forbidden", "The credential scope is not available", nil)
+		return
+	}
+	items, err := s.CredentialStore.List(r.Context(), scopeType, scopeID)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "credentials_unavailable", "Provider credentials could not be loaded", nil)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"credentials": items})
+}
+
+func (s *Server) handlePatchProviderCredential(w http.ResponseWriter, r *http.Request) {
+	owner, _ := requireOwnerMobileAPI(r)
+	if s.CredentialStore == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "credential_store_unavailable", "Provider credential encryption is not configured", nil)
+		return
+	}
+	var request struct {
+		ScopeType string `json:"scopeType"`
+		ScopeID   string `json:"scopeID"`
+		Enabled   *bool  `json:"enabled"`
+	}
+	if !decodeAPIJSON(w, r, &request) {
+		return
+	}
+	if request.ScopeType == "" {
+		request.ScopeType, request.ScopeID = "server_owner", owner.Username
+	}
+	if request.Enabled == nil || !s.ownerControlsCredentialScope(r, owner, request.ScopeType, request.ScopeID) {
+		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_credential_update", "The credential update is invalid", nil)
+		return
+	}
+	metadata, err := s.CredentialStore.SetEnabled(r.Context(), r.PathValue("credentialID"), request.ScopeType, request.ScopeID, *request.Enabled)
+	if err != nil {
+		writeAPIError(w, http.StatusNotFound, "credential_not_found", "Provider credential metadata was not found", nil)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(metadata)
+}
+
+func (s *Server) handleDeleteProviderCredential(w http.ResponseWriter, r *http.Request) {
+	owner, _ := requireOwnerMobileAPI(r)
+	if s.CredentialStore == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "credential_store_unavailable", "Provider credential encryption is not configured", nil)
+		return
+	}
+	scopeType, scopeID := credentialScopeQuery(r, owner)
+	if !s.ownerControlsCredentialScope(r, owner, scopeType, scopeID) {
+		writeAPIError(w, http.StatusForbidden, "credential_scope_forbidden", "The credential scope is not available", nil)
+		return
+	}
+	if err := s.CredentialStore.Delete(r.Context(), r.PathValue("credentialID"), scopeType, scopeID); err != nil {
+		writeAPIError(w, http.StatusNotFound, "credential_not_found", "Provider credential metadata was not found", nil)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleValidateProviderCredential(w http.ResponseWriter, r *http.Request) {
+	owner, _ := requireOwnerMobileAPI(r)
+	if s.CredentialStore == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "credential_store_unavailable", "Provider credential encryption is not configured", nil)
+		return
+	}
+	scopeType, scopeID := credentialScopeQuery(r, owner)
+	if !s.ownerControlsCredentialScope(r, owner, scopeType, scopeID) {
+		writeAPIError(w, http.StatusForbidden, "credential_scope_forbidden", "The credential scope is not available", nil)
+		return
+	}
+	metadata, err := s.CredentialStore.Metadata(r.Context(), r.PathValue("credentialID"), scopeType, scopeID)
+	if err != nil {
+		writeAPIError(w, http.StatusNotFound, "credential_not_found", "Provider credential metadata was not found", nil)
+		return
+	}
+	var validator providers.CredentialValidator
+	switch metadata.Provider {
+	case "twelve-data", "twelvedata", "market":
+		validator, _ = s.MarketProvider.(providers.CredentialValidator)
+	case "openweather":
+		validator, _ = s.WeatherProvider.(providers.CredentialValidator)
+	}
+	if validator == nil {
+		writeAPIError(w, http.StatusUnprocessableEntity, "provider_validation_unsupported", "This provider does not support validation", nil)
+		return
+	}
+	if err := validator.ValidateCredential(r.Context(), metadata.ID, scopeType, scopeID); err != nil {
+		_ = s.CredentialStore.MarkValidation(r.Context(), metadata.ID, "invalid")
+		writeAPIError(w, http.StatusUnprocessableEntity, "provider_credential_invalid", "The provider credential could not be validated", nil)
+		return
+	}
+	_ = s.CredentialStore.MarkValidation(r.Context(), metadata.ID, "valid")
+	metadata, _ = s.CredentialStore.Metadata(r.Context(), metadata.ID, scopeType, scopeID)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(metadata)
+}
+
+func credentialScopeQuery(r *http.Request, owner *data.User) (string, string) {
+	scopeType, scopeID := r.URL.Query().Get("scopeType"), r.URL.Query().Get("scopeID")
+	if scopeType == "" {
+		return "server_owner", owner.Username
+	}
+	return scopeType, scopeID
 }
 
 func (s *Server) ownerControlsCredentialScope(r *http.Request, owner *data.User, scopeType, scopeID string) bool {

@@ -16,6 +16,7 @@ type ProviderCredential struct {
 	ValidationState string     `gorm:"size:24" json:"validationState"`
 	ValidatedAt     *time.Time `json:"validatedAt,omitempty"`
 	LastUsedAt      *time.Time `json:"lastUsedAt,omitempty"`
+	DisabledAt      *time.Time `json:"disabledAt,omitempty"`
 	CreatedAt       time.Time  `json:"createdAt"`
 	UpdatedAt       time.Time  `json:"updatedAt"`
 }

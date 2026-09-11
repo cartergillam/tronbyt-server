@@ -46,9 +46,24 @@ type PairingResult struct {
 	DeviceIDs    []string
 }
 
+type MemberSummary struct {
+	Member    data.HouseholdMember `json:"member"`
+	DeviceIDs []string             `json:"deviceIDs"`
+	Sessions  []data.MobileSession `json:"sessions"`
+}
+
 func NewService(db *gorm.DB, pairingSecret string) (*Service, error) {
-	if len(strings.TrimSpace(pairingSecret)) < 32 {
+	pairingSecret = strings.TrimSpace(pairingSecret)
+	lower := strings.ToLower(pairingSecret)
+	unique := map[rune]bool{}
+	for _, item := range pairingSecret {
+		unique[item] = true
+	}
+	if len(pairingSecret) < 32 {
 		return nil, errors.New("PAIRING_CODE_SECRET must contain at least 32 characters")
+	}
+	if len(unique) < 8 || strings.Contains(lower, "change-me") || strings.Contains(lower, "changeme") || strings.Contains(lower, "replace-me") {
+		return nil, errors.New("PAIRING_CODE_SECRET must be randomly generated, not a placeholder")
 	}
 	return &Service{db: db, pairingSecret: []byte(pairingSecret), now: func() time.Time { return time.Now().UTC() }}, nil
 }
@@ -113,6 +128,73 @@ func (service *Service) CreatePairingCode(ctx context.Context, ownerUsername, me
 		return "", data.PairingCode{}, err
 	}
 	return code, record, nil
+}
+
+func (service *Service) ListMembers(ctx context.Context, ownerUsername string) ([]MemberSummary, error) {
+	var members []data.HouseholdMember
+	if err := service.db.WithContext(ctx).Joins("JOIN households ON households.id = household_members.household_id").
+		Where("households.owner_username = ?", ownerUsername).Order("household_members.display_name ASC").Find(&members).Error; err != nil {
+		return nil, err
+	}
+	result := make([]MemberSummary, 0, len(members))
+	for _, member := range members {
+		var assignments []data.DeviceAssignment
+		if err := service.db.WithContext(ctx).Where("member_id = ?", member.ID).Find(&assignments).Error; err != nil {
+			return nil, err
+		}
+		var sessions []data.MobileSession
+		if err := service.db.WithContext(ctx).Where("member_id = ?", member.ID).Order("created_at DESC").Find(&sessions).Error; err != nil {
+			return nil, err
+		}
+		summary := MemberSummary{Member: member, Sessions: sessions}
+		for _, assignment := range assignments {
+			summary.DeviceIDs = append(summary.DeviceIDs, assignment.DeviceID)
+		}
+		result = append(result, summary)
+	}
+	return result, nil
+}
+
+func (service *Service) UpdateAssignments(ctx context.Context, ownerUsername, memberID string, deviceIDs []string) (MemberSummary, error) {
+	deviceIDs = uniqueStrings(deviceIDs)
+	if len(deviceIDs) == 0 {
+		return MemberSummary{}, errors.New("at least one device is required")
+	}
+	err := service.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var member data.HouseholdMember
+		if err := tx.Joins("JOIN households ON households.id = household_members.household_id").
+			Where("household_members.id = ? AND households.owner_username = ?", memberID, ownerUsername).First(&member).Error; err != nil {
+			return ErrForbidden
+		}
+		for _, deviceID := range deviceIDs {
+			var count int64
+			if err := tx.Model(&data.Device{}).Where("id = ? AND username = ?", deviceID, ownerUsername).Count(&count).Error; err != nil || count != 1 {
+				return ErrForbidden
+			}
+		}
+		if err := tx.Where("member_id = ?", memberID).Delete(&data.DeviceAssignment{}).Error; err != nil {
+			return err
+		}
+		for _, deviceID := range deviceIDs {
+			if err := tx.Create(&data.DeviceAssignment{MemberID: memberID, DeviceID: deviceID}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return MemberSummary{}, err
+	}
+	members, err := service.ListMembers(ctx, ownerUsername)
+	if err != nil {
+		return MemberSummary{}, err
+	}
+	for _, member := range members {
+		if member.Member.ID == memberID {
+			return member, nil
+		}
+	}
+	return MemberSummary{}, ErrForbidden
 }
 
 func (service *Service) Redeem(ctx context.Context, code string, sessionTTL time.Duration) (PairingResult, error) {

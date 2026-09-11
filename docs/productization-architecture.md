@@ -15,9 +15,12 @@ allowlist entries; normal search ranks matching verified and recommended apps
 first. Direct routes and installed filtering operate on the full catalogue and
 do not remove verified metadata.
 
-The initial manifest contains only OG Clock, MLB Game, CFL Scores, and A Quote A
-Day. NWS Daily Forecast is intentionally excluded. Future apps such as Market
-Watch and Local Weather become verified by adding one reviewed manifest entry.
+The production-verified set contains OG Clock, MLB Game, and A Quote A Day. CFL
+Scores is currently a candidate while the numeric-team-ID fix and future-game
+rendering await renewed physical-display approval. Market Watch and Local
+Weather are also candidates. Candidate metadata is visible to clients but does
+not place an app in the verified category or an unattended starter bundle. NWS
+Daily Forecast remains intentionally excluded.
 
 ## Managed provider credentials
 
@@ -40,7 +43,11 @@ Provider cache keys contain normalized request inputs—not secrets or device ID
 This permits safe response sharing for identical market symbols or
 location/unit requests. Adapters apply a minimum request interval, preserve a
 bounded last-known-good response, mark stale results, and return sanitized error
-codes.
+codes. The concrete adapters are Twelve Data (`/quote`) and OpenWeather One Call
+3.0. Twelve Data availability and latency depend on the active subscription, so
+the app labels data as latest/delayed and never promises real-time delivery.
+OpenWeather's One Call data is expected to refresh on roughly a ten-minute
+cadence.
 
 ### Existing raw-key fields
 
@@ -65,10 +72,12 @@ member.
 | --- | --- | --- | --- |
 | Owner user API key | All owned devices | Metadata/write/rotate | Existing owner UI |
 | Member mobile session | Assigned devices only | None | None |
-| Device API key | That device only | None | None |
+| Device API key | Frame polling and operational device reporting only | None | None |
 
 Member sessions enter the existing `RequireDevice` path with only assigned
-devices preloaded. Device authentication remains separate and unchanged.
+devices preloaded. Explicit mobile-control and owner guards reject device keys;
+the catalogue/mobile middleware cannot promote a matching device key into an
+owner principal.
 
 ## Pairing flow
 
@@ -90,8 +99,8 @@ requiring an explicit user choice remain available for manual installation.
 
 ## Market and weather provider contracts
 
-`internal/providers` defines implementation-neutral contracts for the next
-pass. Market requests allow one to ten unique symbols and return symbol/display
+`internal/providers` defines implementation-neutral contracts. Market requests
+allow one to ten unique symbols and return symbol/display
 name, latest available price, absolute and percentage change, market status,
 logo reference, quote timestamp, provider update time, and stale state. A
 provider adapter must describe its plan latency; the UI must not say “real time”
@@ -122,3 +131,11 @@ Back up the database together with the exact master-key version. Losing the
 master key makes encrypted credentials intentionally unrecoverable; rotating
 the deployment master key requires a dedicated decrypt-and-reencrypt operation,
 which is separate from routine provider-secret rotation.
+
+Startup treats these product features as optional fail-closed capabilities:
+an absent or invalid credential master key disables credential management and
+provider adapters; an absent, short, common, or low-diversity pairing secret
+disables household provisioning. Existing frame polling continues to operate.
+Capabilities report availability as booleans and never reveal secret values or
+validation details. Production must use randomly generated values; repeated-byte
+or placeholder material is rejected.

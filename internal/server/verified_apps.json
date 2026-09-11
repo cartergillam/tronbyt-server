@@ -20,11 +20,10 @@
     }
   },
   "cfl-scores": {
-    "verified": true,
-    "recommended": true,
-    "verifiedVersion": "9e98e9617",
-    "verificationDate": "2026-08-06",
-    "compatibilityNotes": "Physically validated on a 64x32 MatrixPortal S3 display."
+    "verified": false,
+    "candidate": true,
+    "recommended": false,
+    "compatibilityNotes": "Schedule-selection rewrite passes deterministic fixtures and requires renewed physical approval before verification."
   },
   "quote-of-the-day": {
     "verified": true,
@@ -32,5 +31,17 @@
     "verifiedVersion": "9e98e9617",
     "verificationDate": "2026-08-06",
     "compatibilityNotes": "Installation flow physically validated; upstream quote availability can affect preview rendering."
+  },
+  "market-watch": {
+    "verified": false,
+    "candidate": true,
+    "recommended": false,
+    "compatibilityNotes": "Candidate using server-managed Twelve Data quotes; requires configured credentials and physical approval."
+  },
+  "local-weather": {
+    "verified": false,
+    "candidate": true,
+    "recommended": false,
+    "compatibilityNotes": "Candidate using server-managed OpenWeather One Call 3.0 data; requires configured credentials and physical approval."
   }
 }

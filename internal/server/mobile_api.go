@@ -236,6 +236,7 @@ type catalogueApp struct {
 	LocationAware                  bool              `json:"locationAware"`
 	Installed                      bool              `json:"installed"`
 	Verified                       bool              `json:"verified"`
+	Candidate                      bool              `json:"candidate,omitempty"`
 	Recommended                    bool              `json:"recommended"`
 	VerifiedVersion                string            `json:"verifiedVersion,omitempty"`
 	VerificationDate               string            `json:"verificationDate,omitempty"`
@@ -276,6 +277,7 @@ func (s *Server) catalogueForUser(user *data.User) []catalogueApp {
 		}
 		if verified, ok := verifiedMetadataFor(meta.ID); ok {
 			item.Verified = verified.Verified
+			item.Candidate = verified.Candidate
 			item.Recommended = verified.Recommended
 			item.VerifiedVersion = verified.VerifiedVersion
 			item.VerificationDate = verified.VerificationDate

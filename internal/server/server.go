@@ -24,6 +24,7 @@ import (
 	"tronbyt-server/internal/config"
 	"tronbyt-server/internal/credentials"
 	"tronbyt-server/internal/gitutils"
+	"tronbyt-server/internal/providers"
 	"tronbyt-server/internal/provisioning"
 	syncer "tronbyt-server/internal/sync"
 	"tronbyt-server/web"
@@ -55,6 +56,8 @@ type Server struct {
 	OIDCProvider    *OIDCProvider
 	CredentialStore *credentials.Store
 	Provisioning    *provisioning.Service
+	MarketProvider  providers.MarketProvider
+	WeatherProvider providers.WeatherProvider
 
 	systemAppsCache      []apps.AppMetadata
 	systemAppsCacheMutex sync.RWMutex
@@ -131,6 +134,8 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 			slog.Error("Provider credential store disabled", "reason", "invalid_master_key")
 		} else {
 			s.CredentialStore = store
+			s.MarketProvider = providers.NewTwelveDataAdapter(store, nil)
+			s.WeatherProvider = providers.NewOpenWeatherAdapter(store, nil)
 		}
 	}
 	if cfg.PairingCodeSecret != "" {

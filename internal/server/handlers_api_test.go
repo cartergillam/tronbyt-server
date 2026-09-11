@@ -237,7 +237,7 @@ func TestHandleGetDevice(t *testing.T) {
 
 func TestHandlePushImage(t *testing.T) {
 	s := newTestServerAPI(t)
-	apiKey := "device_api_key"
+	apiKey := "test_api_key"
 	deviceID := "testdevice"
 	installID := "testapp"
 
@@ -286,7 +286,7 @@ func TestHandlePushImage(t *testing.T) {
 
 func TestHandlePushApp(t *testing.T) {
 	s := newTestServerAPI(t)
-	apiKey := "device_api_key"
+	apiKey := "test_api_key"
 	deviceID := "testdevice"
 	appID := "testsystemapp"
 
@@ -349,7 +349,7 @@ func TestHandlePushAppDefaultsToOneShot(t *testing.T) {
 		InstallationID: "one-shot",
 		Config:         map[string]any{"color": "#ff0000"},
 	})
-	req := newAPIRequest("POST", fmt.Sprintf("/v0/devices/%s/push_app", deviceID), "device_api_key", body)
+	req := newAPIRequest("POST", fmt.Sprintf("/v0/devices/%s/push_app", deviceID), "test_api_key", body)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -369,7 +369,7 @@ func TestHandlePushAppRequiresRestoreTarget(t *testing.T) {
 	s := newTestServerAPI(t)
 	appID := setupColorApp(t, s)
 	body, _ := json.Marshal(PushAppData{AppID: appID, Config: map[string]any{"color": "#ff0000"}})
-	req := newAPIRequest("POST", "/v0/devices/testdevice/push_app", "device_api_key", body)
+	req := newAPIRequest("POST", "/v0/devices/testdevice/push_app", "test_api_key", body)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
@@ -385,7 +385,7 @@ func TestHandlePushAppRejectsStaleState(t *testing.T) {
 		AppID: appID, Config: map[string]any{"color": "#ff0000"},
 		ExpectedStateVersion: &stale, MutationID: "stale-show-now",
 	})
-	req := newAPIRequest("POST", "/v0/devices/testdevice/push_app", "device_api_key", body)
+	req := newAPIRequest("POST", "/v0/devices/testdevice/push_app", "test_api_key", body)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
@@ -394,7 +394,7 @@ func TestHandlePushAppRejectsStaleState(t *testing.T) {
 
 func TestHandlePushAppUpdatesExistingInstallation(t *testing.T) {
 	s := newTestServerAPI(t)
-	apiKey := "device_api_key"
+	apiKey := "test_api_key"
 	deviceID := "testdevice"
 	appID := "colorapp"
 
@@ -451,7 +451,7 @@ def main(config):
 func TestHandlePushAppMissingCachedImage(t *testing.T) {
 	s := newTestServerAPI(t)
 	ctx := context.Background()
-	apiKey := "device_api_key"
+	apiKey := "test_api_key"
 	deviceID := "testdevice"
 	appID := "colorapp"
 	installID := "orphaned"
@@ -557,7 +557,7 @@ func seedShowNowRestoreTarget(t *testing.T, s *Server, deviceID string) {
 // triggers a fresh render, replacing the cached image rather than serving it.
 func TestHandlePushAppConfigReplacesCache(t *testing.T) {
 	s := newTestServerAPI(t)
-	apiKey := "device_api_key"
+	apiKey := "test_api_key"
 	deviceID := "testdevice"
 	appID := setupColorApp(t, s)
 	installID := "cached-install"
@@ -584,7 +584,7 @@ func TestHandlePushAppConfigReplacesCache(t *testing.T) {
 // serves the existing cached image without re-rendering.
 func TestHandlePushAppNoCacheConfigServesCache(t *testing.T) {
 	s := newTestServerAPI(t)
-	apiKey := "device_api_key"
+	apiKey := "test_api_key"
 	deviceID := "testdevice"
 	installID := "cached-install"
 	sentinel := seedPushedInstallation(t, s, deviceID, installID)
@@ -603,7 +603,7 @@ func TestHandlePushAppNoCacheConfigServesCache(t *testing.T) {
 
 func TestHandlePushAppAppIDOnly(t *testing.T) {
 	s := newTestServerAPI(t)
-	apiKey := "device_api_key"
+	apiKey := "test_api_key"
 	deviceID := "testdevice"
 	appID := setupColorApp(t, s)
 	seedShowNowRestoreTarget(t, s, deviceID)
@@ -624,7 +624,7 @@ func TestHandlePushAppAppIDOnly(t *testing.T) {
 
 func TestHandlePushAppNoAppIDNoInstallationID(t *testing.T) {
 	s := newTestServerAPI(t)
-	apiKey := "device_api_key"
+	apiKey := "test_api_key"
 	deviceID := "testdevice"
 
 	body, _ := json.Marshal(PushAppData{})
@@ -637,7 +637,7 @@ func TestHandlePushAppNoAppIDNoInstallationID(t *testing.T) {
 
 func TestHandlePushAppBackground(t *testing.T) {
 	s := newTestServerAPI(t)
-	apiKey := "device_api_key"
+	apiKey := "test_api_key"
 	deviceID := "testdevice"
 	appID := setupColorApp(t, s)
 	installID := "bg-install"
@@ -833,7 +833,7 @@ func TestHandlePatchDeviceSleepWakePreservesRotationAndBrightness(t *testing.T) 
 
 	sleep := true
 	body, _ := json.Marshal(DeviceUpdate{Sleeping: &sleep, ExpectedStateVersion: &device.StateVersion, MutationID: "sleep-test"})
-	req := newAPIRequest("PATCH", "/v0/devices/testdevice", "device_api_key", body)
+	req := newAPIRequest("PATCH", "/v0/devices/testdevice", "test_api_key", body)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -852,7 +852,7 @@ func TestHandlePatchDeviceSleepWakePreservesRotationAndBrightness(t *testing.T) 
 
 	wake := false
 	body, _ = json.Marshal(DeviceUpdate{Sleeping: &wake, ExpectedStateVersion: &device.StateVersion, MutationID: "wake-test"})
-	req = newAPIRequest("PATCH", "/v0/devices/testdevice", "device_api_key", body)
+	req = newAPIRequest("PATCH", "/v0/devices/testdevice", "test_api_key", body)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -907,7 +907,7 @@ func TestHandlePatchDeviceLocationPersistsAndInvalidatesRenders(t *testing.T) {
 		Provider:    "apple",
 	}
 	body, _ := json.Marshal(DeviceUpdate{Location: &location})
-	req := newAPIRequest("PATCH", "/v0/devices/testdevice", "device_api_key", body)
+	req := newAPIRequest("PATCH", "/v0/devices/testdevice", "test_api_key", body)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -924,7 +924,7 @@ func TestHandlePatchDeviceLocationPersistsAndInvalidatesRenders(t *testing.T) {
 
 	empty := data.DeviceLocation{}
 	body, _ = json.Marshal(DeviceUpdate{Location: &empty})
-	req = newAPIRequest("PATCH", "/v0/devices/testdevice", "device_api_key", body)
+	req = newAPIRequest("PATCH", "/v0/devices/testdevice", "test_api_key", body)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -944,7 +944,7 @@ func TestDeviceKeyCannotPatchAnotherDeviceLocation(t *testing.T) {
 	req := newAPIRequest("PATCH", "/v0/devices/otherdevice", "device_api_key", body)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusNotFound, rr.Code)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
 
 	unchanged, err := gorm.G[data.Device](s.DB).Where("id = ?", "otherdevice").First(ctx)
 	require.NoError(t, err)
@@ -1280,7 +1280,7 @@ func TestHandleDeleteInstallationAPI_ByInstallationID(t *testing.T) {
 
 func TestHandlePatchDeviceDeviceKey(t *testing.T) {
 	s := newTestServerAPI(t)
-	apiKey := "device_api_key"
+	apiKey := "test_api_key"
 	deviceID := "testdevice"
 	installID := "testapp"
 
@@ -1322,7 +1322,7 @@ func TestHandlePatchDeviceDeviceKey(t *testing.T) {
 
 func TestHandleListInstallationsDeviceKey(t *testing.T) {
 	s := newTestServerAPI(t)
-	apiKey := "device_api_key"
+	apiKey := "test_api_key"
 	deviceID := "testdevice"
 
 	// Add a dummy app to the device
