@@ -84,6 +84,9 @@ func (s *Store) Put(ctx context.Context, id, provider, scopeType, scopeID, secre
 	if s == nil || s.aead == nil {
 		return Metadata{}, ErrMasterKeyUnavailable
 	}
+	// Provider API keys are opaque tokens. Trim paste-only whitespace before
+	// encrypting so a trailing newline cannot become part of an HTTP credential.
+	secret = strings.TrimSpace(secret)
 	if strings.TrimSpace(id) == "" || strings.TrimSpace(provider) == "" || strings.TrimSpace(scopeType) == "" || strings.TrimSpace(scopeID) == "" || secret == "" {
 		return Metadata{}, errors.New("credential ID, provider, scope and secret are required")
 	}

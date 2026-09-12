@@ -56,6 +56,16 @@ func TestCredentialEncryptionRotationAndMetadataRedaction(t *testing.T) {
 	assert.Equal(t, "second-secret", resolved)
 }
 
+func TestCredentialStoreTrimsPasteWhitespace(t *testing.T) {
+	store, _ := testStore(t)
+	ctx := context.Background()
+	_, err := store.Put(ctx, "market-primary", "twelve-data", "server_owner", "owner", " \n  test-token\t")
+	require.NoError(t, err)
+	resolved, err := store.Resolve(ctx, "market-primary", "server_owner", "owner")
+	require.NoError(t, err)
+	assert.Equal(t, "test-token", resolved)
+}
+
 func TestCredentialScopeIsolationAndMissingMasterKey(t *testing.T) {
 	store, _ := testStore(t)
 	ctx := context.Background()

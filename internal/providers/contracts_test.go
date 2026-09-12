@@ -142,6 +142,38 @@ func TestTwelveDataAdapterNormalizesCachesAndRedactsCredential(t *testing.T) {
 	assert.Equal(t, int32(2), calls.Load())
 }
 
+func TestTwelveDataAdapterTrimsPastedCredentialWhitespace(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		assert.Equal(t, "apikey test-secret", request.Header.Get("Authorization"))
+		assert.NotContains(t, request.URL.String(), "test-secret")
+		return jsonResponse(http.StatusOK, map[string]any{
+			"symbol": "AAPL", "close": "101.25", "change": "1.25", "percent_change": "1.25",
+			"timestamp": 1786028400, "is_market_open": true,
+		}), nil
+	})}
+	adapter := NewTwelveDataAdapter(fakeResolver{secret: " \n test-secret\t"}, client)
+	quotes, err := adapter.Quotes(t.Context(), MarketRequest{Symbols: []string{"AAPL"}, CredentialID: "market-primary", ScopeType: "server_owner", ScopeID: "owner"})
+	require.NoError(t, err)
+	require.Len(t, quotes, 1)
+}
+
+func TestTwelveDataCredentialValidationUsesBasicAAPLTimeSeries(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		assert.Equal(t, "/time_series", request.URL.Path)
+		assert.Equal(t, "AAPL", request.URL.Query().Get("symbol"))
+		assert.Equal(t, "1day", request.URL.Query().Get("interval"))
+		assert.Equal(t, "1", request.URL.Query().Get("outputsize"))
+		assert.Equal(t, "test-secret", request.URL.Query().Get("apikey"))
+		assert.Empty(t, request.Header.Get("Authorization"))
+		return jsonResponse(http.StatusOK, map[string]any{
+			"meta":   map[string]any{"symbol": "AAPL", "interval": "1day", "currency": "USD", "exchange": "NASDAQ", "mic_code": "XNAS"},
+			"values": []map[string]any{{"datetime": "2026-09-11", "close": "101.25"}},
+		}), nil
+	})}
+	adapter := NewTwelveDataAdapter(fakeResolver{secret: " test-secret\n"}, client)
+	require.NoError(t, adapter.ValidateCredential(t.Context(), "market-primary", "server_owner", "owner"))
+}
+
 func TestTwelveDataAdapterReportsMissingCredentialWithoutRequestingProvider(t *testing.T) {
 	var calls atomic.Int32
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -280,6 +312,75 @@ func TestTwelveDataAdapterRecognizesPlanRestrictionReportedAsCode401(t *testing.
 	require.ErrorAs(t, err, &sanitized)
 	assert.Equal(t, "provider_entitlement_required", sanitized.Code)
 	assert.NotContains(t, sanitized.Message, "exchange")
+}
+
+func TestTwelveDataAdapterMapsHTTPErrorBodiesBeforeStatus(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		httpStatus int
+		bodyCode   int
+		message    string
+		want       string
+	}{
+		{name: "invalid key", httpStatus: http.StatusUnauthorized, bodyCode: http.StatusUnauthorized, message: "invalid api key", want: "provider_credential_invalid"},
+		{name: "plan", httpStatus: http.StatusUnauthorized, bodyCode: http.StatusUnauthorized, message: "plan does not have access", want: "provider_entitlement_required"},
+		{name: "rate limit", httpStatus: http.StatusTooManyRequests, bodyCode: http.StatusTooManyRequests, message: "too many requests", want: "provider_rate_limited"},
+		{name: "bad symbol", httpStatus: http.StatusBadRequest, bodyCode: http.StatusBadRequest, message: "invalid symbol", want: "invalid_symbol"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return jsonResponse(test.httpStatus, map[string]any{"status": "error", "code": test.bodyCode, "message": test.message}), nil
+			})}
+			adapter := NewTwelveDataAdapter(fakeResolver{secret: "test-secret"}, client)
+			_, err := adapter.Quotes(t.Context(), MarketRequest{Symbols: []string{"AAPL"}, CredentialID: "market-primary", ScopeType: "server_owner", ScopeID: "owner"})
+			var sanitized SanitizedError
+			require.ErrorAs(t, err, &sanitized)
+			assert.Equal(t, test.want, sanitized.Code)
+		})
+	}
+}
+
+func TestTwelveDataAdapterKeepsClassifiedFailureStableDuringLocalThrottle(t *testing.T) {
+	var calls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return jsonResponse(http.StatusOK, map[string]any{"status": "error", "code": http.StatusUnauthorized, "message": "invalid api key"}), nil
+	})}
+	adapter := NewTwelveDataAdapter(fakeResolver{secret: "test-secret"}, client)
+	request := MarketRequest{Symbols: []string{"AAPL"}, CredentialID: "market-primary", ScopeType: "server_owner", ScopeID: "owner"}
+	for range 2 {
+		_, err := adapter.Quotes(t.Context(), request)
+		var sanitized SanitizedError
+		require.ErrorAs(t, err, &sanitized)
+		assert.Equal(t, "provider_credential_invalid", sanitized.Code)
+	}
+	assert.Equal(t, int32(1), calls.Load())
+}
+
+func TestTwelveDataCredentialValidationClassifiesOfflineFailures(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		httpStatus int
+		body       string
+		want       string
+	}{
+		{name: "bad key", httpStatus: http.StatusUnauthorized, body: `{"status":"error","code":401,"message":"bad key"}`, want: "provider_credential_invalid"},
+		{name: "rate limited", httpStatus: http.StatusTooManyRequests, body: `{"status":"error","code":429,"message":"too many requests"}`, want: "provider_rate_limited"},
+		{name: "plan", httpStatus: http.StatusForbidden, body: `{"status":"error","code":403,"message":"plan restriction"}`, want: "provider_entitlement_required"},
+		{name: "bad symbol", httpStatus: http.StatusBadRequest, body: `{"status":"error","code":400,"message":"invalid symbol"}`, want: "invalid_symbol"},
+		{name: "malformed", httpStatus: http.StatusOK, body: `{`, want: "provider_response_invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: test.httpStatus, Body: io.NopCloser(strings.NewReader(test.body)), Header: make(http.Header)}, nil
+			})}
+			adapter := NewTwelveDataAdapter(fakeResolver{secret: "test-secret"}, client)
+			err := adapter.ValidateCredential(t.Context(), "market-primary", "server_owner", "owner")
+			var sanitized SanitizedError
+			require.ErrorAs(t, err, &sanitized)
+			assert.Equal(t, test.want, sanitized.Code)
+		})
+	}
 }
 
 func TestOpenWeatherAdapterMapsNoAlertsAndUsesStaleCache(t *testing.T) {

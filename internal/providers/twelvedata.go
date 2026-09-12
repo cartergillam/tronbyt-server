@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,7 +19,13 @@ const (
 	marketClosedFreshTTL   = 45 * time.Minute
 	marketStaleTTL         = 30 * time.Minute
 	marketRateLimitBackoff = 15 * time.Minute
+	marketFailureRetry     = 30 * time.Second
 )
+
+type marketFailure struct {
+	err   error
+	until time.Time
+}
 
 type TwelveDataAdapter struct {
 	Credentials  CredentialResolver
@@ -27,6 +34,8 @@ type TwelveDataAdapter struct {
 	Cache        *Cache[[]MarketQuote]
 	backoffMu    sync.Mutex
 	backoffUntil map[string]time.Time
+	failureMu    sync.Mutex
+	failures     map[string]marketFailure
 }
 
 func NewTwelveDataAdapter(credentials CredentialResolver, client *http.Client) *TwelveDataAdapter {
@@ -39,6 +48,7 @@ func NewTwelveDataAdapter(credentials CredentialResolver, client *http.Client) *
 		// a Basic-plan quote credit on every render after an upstream failure.
 		Cache:        NewCache[[]MarketQuote](marketOpenFreshTTL),
 		backoffUntil: make(map[string]time.Time),
+		failures:     make(map[string]marketFailure),
 	}
 }
 
@@ -53,6 +63,9 @@ func (adapter *TwelveDataAdapter) Quotes(ctx context.Context, request MarketRequ
 	}
 	key := request.ScopeType + ":" + request.ScopeID + ":" + request.CredentialID + ":" + strings.Join(normalized, ",")
 	backoffKey := request.ScopeType + ":" + request.ScopeID + ":" + request.CredentialID
+	if err := adapter.recentFailure(key); err != nil {
+		return nil, err
+	}
 	quotes, stale, err := adapter.Cache.GetWithTTL(ctx, key, marketStaleTTL, func(ctx context.Context) ([]MarketQuote, time.Duration, error) {
 		if adapter.rateLimited(backoffKey) {
 			return nil, 0, SanitizedError{Code: "provider_rate_limited", Message: "Market data is temporarily rate limited", Retryable: true}
@@ -73,8 +86,10 @@ func (adapter *TwelveDataAdapter) Quotes(ctx context.Context, request MarketRequ
 		return result, quoteFreshTTL(result), nil
 	})
 	if err != nil {
+		adapter.recordFailure(key, err)
 		return nil, err
 	}
+	adapter.clearFailure(key)
 	// The cached slice is shared. Copy it before annotating a stale fallback so
 	// a later fresh request can never inherit the stale marker.
 	quotes = append([]MarketQuote(nil), quotes...)
@@ -121,11 +136,20 @@ func (adapter *TwelveDataAdapter) ValidateCredential(ctx context.Context, id, sc
 	if err != nil {
 		return MissingCredential("Market data")
 	}
-	_, err = adapter.fetchQuote(ctx, "AAPL", secret)
-	return err
+	if err := adapter.validateAAPL(ctx, secret); err != nil {
+		return err
+	}
+	// A successfully validated replacement credential should be usable on the
+	// next render, rather than waiting for a previous local error throttle.
+	adapter.clearCredentialState(scopeType, scopeID, id)
+	return nil
 }
 
 func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret string) (MarketQuote, error) {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return MarketQuote{}, MissingCredential("Market data")
+	}
 	endpoint, _ := url.Parse(strings.TrimRight(adapter.BaseURL, "/") + "/quote")
 	query := endpoint.Query()
 	query.Set("symbol", symbol)
@@ -140,17 +164,9 @@ func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret
 		return MarketQuote{}, TemporarilyUnavailable()
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return MarketQuote{}, SanitizedError{Code: "provider_rate_limited", Message: "Market data is temporarily rate limited", Retryable: true}
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		return MarketQuote{}, SanitizedError{Code: "provider_credential_invalid", Message: "The market credential could not be validated", Retryable: false}
-	}
-	if resp.StatusCode == http.StatusForbidden {
-		return MarketQuote{}, SanitizedError{Code: "provider_entitlement_required", Message: "The market symbol is not available on this provider plan", Retryable: false}
-	}
-	if resp.StatusCode != http.StatusOK {
-		return MarketQuote{}, TemporarilyUnavailable()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil {
+		return MarketQuote{}, SanitizedError{Code: "provider_response_invalid", Message: "Market data could not be read", Retryable: true}
 	}
 	var payload struct {
 		Symbol        string `json:"symbol"`
@@ -172,26 +188,11 @@ func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret
 		Code          int    `json:"code"`
 		Message       string `json:"message"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		return MarketQuote{}, SanitizedError{Code: "provider_response_invalid", Message: "Market data could not be read", Retryable: true}
 	}
-	if payload.Status == "error" || payload.Code != 0 {
-		lowerMessage := strings.ToLower(payload.Message)
-		switch payload.Code {
-		case http.StatusTooManyRequests:
-			return MarketQuote{}, SanitizedError{Code: "provider_rate_limited", Message: "Market data is temporarily rate limited", Retryable: true}
-		case http.StatusUnauthorized:
-			if containsAny(lowerMessage, "plan", "premium", "subscription", "not available", "access") {
-				return MarketQuote{}, SanitizedError{Code: "provider_entitlement_required", Message: "The market symbol is not available on this provider plan", Retryable: false}
-			}
-			return MarketQuote{}, SanitizedError{Code: "provider_credential_invalid", Message: "The market credential could not be validated", Retryable: false}
-		case http.StatusForbidden:
-			return MarketQuote{}, SanitizedError{Code: "provider_entitlement_required", Message: "The market symbol is not available on this provider plan", Retryable: false}
-		}
-		if payload.Code == http.StatusBadRequest || payload.Code == http.StatusNotFound || strings.Contains(lowerMessage, "symbol") {
-			return MarketQuote{}, SanitizedError{Code: "invalid_symbol", Message: "A market symbol is not available", Retryable: false}
-		}
-		return MarketQuote{}, TemporarilyUnavailable()
+	if err := twelveDataError(resp.StatusCode, payload.Code, payload.Status, payload.Message); err != nil {
+		return MarketQuote{}, err
 	}
 	price, priceErr := strconv.ParseFloat(payload.Close, 64)
 	change, changeErr := strconv.ParseFloat(payload.Change, 64)
@@ -233,6 +234,143 @@ func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret
 		MarketStatus: status, QuoteTimestamp: updated, ProviderUpdated: updated,
 		Delayed: payload.IsEOD || payload.IsDelayed,
 	}, nil
+}
+
+func (adapter *TwelveDataAdapter) validateAAPL(ctx context.Context, secret string) error {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return MissingCredential("Market data")
+	}
+	endpoint, _ := url.Parse(strings.TrimRight(adapter.BaseURL, "/") + "/time_series")
+	query := endpoint.Query()
+	query.Set("symbol", "AAPL")
+	query.Set("interval", "1day")
+	query.Set("outputsize", "1")
+	// This is the lowest-cost, Basic-compatible endpoint and matches the
+	// documented request shape used for manual credential validation.
+	query.Set("apikey", secret)
+	endpoint.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return TemporarilyUnavailable()
+	}
+	resp, err := adapter.Client.Do(req)
+	if err != nil {
+		return TemporarilyUnavailable()
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil {
+		return SanitizedError{Code: "provider_response_invalid", Message: "Market data could not be read", Retryable: true}
+	}
+	var payload struct {
+		Meta struct {
+			Symbol string `json:"symbol"`
+		} `json:"meta"`
+		Values []struct {
+			Close string `json:"close"`
+		} `json:"values"`
+		Status  string `json:"status"`
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return SanitizedError{Code: "provider_response_invalid", Message: "Market data could not be read", Retryable: true}
+	}
+	if err := twelveDataError(resp.StatusCode, payload.Code, payload.Status, payload.Message); err != nil {
+		return err
+	}
+	if payload.Meta.Symbol == "" || len(payload.Values) != 1 {
+		return SanitizedError{Code: "provider_response_invalid", Message: "Market data could not be read", Retryable: true}
+	}
+	if _, err := strconv.ParseFloat(payload.Values[0].Close, 64); err != nil {
+		return SanitizedError{Code: "provider_response_invalid", Message: "Market data could not be read", Retryable: true}
+	}
+	return nil
+}
+
+func twelveDataError(httpStatus, providerCode int, status, message string) error {
+	if httpStatus == http.StatusOK && status != "error" && providerCode == 0 {
+		return nil
+	}
+	code := providerCode
+	if code == 0 {
+		code = httpStatus
+	}
+	lowerMessage := strings.ToLower(message)
+	switch code {
+	case http.StatusTooManyRequests:
+		return SanitizedError{Code: "provider_rate_limited", Message: "Market data is temporarily rate limited", Retryable: true}
+	case http.StatusUnauthorized:
+		if containsAny(lowerMessage, "plan", "premium", "subscription", "not available", "access") {
+			return SanitizedError{Code: "provider_entitlement_required", Message: "The market symbol is not available on this provider plan", Retryable: false}
+		}
+		return SanitizedError{Code: "provider_credential_invalid", Message: "The market credential could not be validated", Retryable: false}
+	case http.StatusForbidden:
+		return SanitizedError{Code: "provider_entitlement_required", Message: "The market symbol is not available on this provider plan", Retryable: false}
+	case http.StatusBadRequest, http.StatusNotFound:
+		return SanitizedError{Code: "invalid_symbol", Message: "A market symbol is not available", Retryable: false}
+	}
+	if strings.Contains(lowerMessage, "symbol") {
+		return SanitizedError{Code: "invalid_symbol", Message: "A market symbol is not available", Retryable: false}
+	}
+	return TemporarilyUnavailable()
+}
+
+func (adapter *TwelveDataAdapter) recordFailure(key string, err error) {
+	adapter.failureMu.Lock()
+	adapter.failures[key] = marketFailure{err: err, until: time.Now().Add(marketFailureRetry)}
+	adapter.failureMu.Unlock()
+}
+
+func (adapter *TwelveDataAdapter) recentFailure(key string) error {
+	adapter.failureMu.Lock()
+	failure, found := adapter.failures[key]
+	if !found {
+		adapter.failureMu.Unlock()
+		return nil
+	}
+	if time.Now().Before(failure.until) {
+		adapter.failureMu.Unlock()
+		return failure.err
+	}
+	delete(adapter.failures, key)
+	adapter.failureMu.Unlock()
+	// Cache's normal request throttle must not replace an expired classified
+	// provider failure with a generic local throttling error.
+	adapter.Cache.mu.Lock()
+	delete(adapter.Cache.lastRun, key)
+	adapter.Cache.mu.Unlock()
+	return nil
+}
+
+func (adapter *TwelveDataAdapter) clearFailure(key string) {
+	adapter.failureMu.Lock()
+	delete(adapter.failures, key)
+	adapter.failureMu.Unlock()
+}
+
+func (adapter *TwelveDataAdapter) clearCredentialState(scopeType, scopeID, credentialID string) {
+	prefix := scopeType + ":" + scopeID + ":" + credentialID + ":"
+	adapter.failureMu.Lock()
+	for key := range adapter.failures {
+		if strings.HasPrefix(key, prefix) {
+			delete(adapter.failures, key)
+		}
+	}
+	adapter.failureMu.Unlock()
+	adapter.Cache.mu.Lock()
+	for key := range adapter.Cache.entries {
+		if strings.HasPrefix(key, prefix) {
+			delete(adapter.Cache.entries, key)
+		}
+	}
+	for key := range adapter.Cache.lastRun {
+		if strings.HasPrefix(key, prefix) {
+			delete(adapter.Cache.lastRun, key)
+		}
+	}
+	adapter.Cache.mu.Unlock()
 }
 
 func (adapter *TwelveDataAdapter) String() string {
