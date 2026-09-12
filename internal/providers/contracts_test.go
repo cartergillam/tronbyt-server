@@ -107,8 +107,8 @@ func TestTwelveDataAdapterNormalizesCachesAndRedactsCredential(t *testing.T) {
 		symbol := request.URL.Query().Get("symbol")
 		return jsonResponse(http.StatusOK, map[string]any{
 			"symbol": symbol, "name": symbol + " Inc", "close": "101.25", "change": "1.25",
-			"percent_change": "1.25", "timestamp": 1786028400, "is_market_open": true,
-			"exchange": "NASDAQ", "mic": "XNAS", "currency": "USD",
+			"percent_change": "1.25", "timestamp": 1786028400, "last_quote_at": 1786028460, "is_market_open": true,
+			"exchange": "NASDAQ", "mic_code": "XNAS", "currency": "USD",
 		}), nil
 	})}
 	adapter := NewTwelveDataAdapter(fakeResolver{secret: "test-secret"}, client)
@@ -124,6 +124,7 @@ func TestTwelveDataAdapterNormalizesCachesAndRedactsCredential(t *testing.T) {
 	assert.Equal(t, "XNAS", first[0].MIC)
 	assert.Equal(t, "USD", first[0].Currency)
 	assert.Equal(t, MarketOpen, first[0].MarketStatus)
+	assert.Equal(t, time.Unix(1786028460, 0).UTC(), first[0].ProviderUpdated)
 	assert.False(t, first[0].Delayed)
 	assert.Equal(t, first, second)
 	assert.Equal(t, int32(2), calls.Load())
@@ -150,7 +151,7 @@ func TestTwelveDataAdapterUsesClosedMarketTTLAndExplicitEODStatus(t *testing.T) 
 		return jsonResponse(http.StatusOK, map[string]any{
 			"symbol": request.URL.Query().Get("symbol"), "name": "Shopify", "close": "156.32", "change": "-1.84",
 			"percent_change": "-1.16", "timestamp": 1786028400, "is_market_open": false, "is_eod": true,
-			"exchange": "Toronto Stock Exchange", "mic": "XTSE", "currency": "CAD",
+			"exchange": "Toronto Stock Exchange", "mic_code": "XTSE", "currency": "CAD",
 		}), nil
 	})}
 	adapter := NewTwelveDataAdapter(fakeResolver{secret: "test-secret"}, client)
@@ -227,6 +228,46 @@ func TestTwelveDataAdapterBacksOffAcrossWatchlistsAfterRateLimit(t *testing.T) {
 	require.ErrorAs(t, err, &sanitized)
 	assert.Equal(t, "provider_rate_limited", sanitized.Code)
 	assert.Equal(t, int32(1), calls.Load(), "a second watchlist must honor the credential-level backoff")
+}
+
+func TestTwelveDataAdapterMapsJSONErrorCodesWithoutLeakingProviderMessages(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		code int
+		want string
+	}{
+		{name: "rate limit", code: http.StatusTooManyRequests, want: "provider_rate_limited"},
+		{name: "invalid credential", code: http.StatusUnauthorized, want: "provider_credential_invalid"},
+		{name: "plan entitlement", code: http.StatusForbidden, want: "provider_entitlement_required"},
+		{name: "invalid symbol", code: http.StatusBadRequest, want: "invalid_symbol"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return jsonResponse(http.StatusOK, map[string]any{"status": "error", "code": test.code, "message": "secret provider detail"}), nil
+			})}
+			adapter := NewTwelveDataAdapter(fakeResolver{secret: "test-secret"}, client)
+			_, err := adapter.Quotes(t.Context(), MarketRequest{Symbols: []string{"AAPL"}, CredentialID: "market-primary", ScopeType: "server_owner", ScopeID: "owner"})
+			var sanitized SanitizedError
+			require.ErrorAs(t, err, &sanitized)
+			assert.Equal(t, test.want, sanitized.Code)
+			assert.NotContains(t, sanitized.Message, "secret provider detail")
+		})
+	}
+}
+
+func TestTwelveDataAdapterRecognizesPlanRestrictionReportedAsCode401(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, map[string]any{
+			"status": "error", "code": http.StatusUnauthorized,
+			"message": "Your current plan does not have access to this exchange",
+		}), nil
+	})}
+	adapter := NewTwelveDataAdapter(fakeResolver{secret: "test-secret"}, client)
+	_, err := adapter.Quotes(t.Context(), MarketRequest{Symbols: []string{"SHOP:TSX"}, CredentialID: "market-primary", ScopeType: "server_owner", ScopeID: "owner"})
+	var sanitized SanitizedError
+	require.ErrorAs(t, err, &sanitized)
+	assert.Equal(t, "provider_entitlement_required", sanitized.Code)
+	assert.NotContains(t, sanitized.Message, "exchange")
 }
 
 func TestOpenWeatherAdapterMapsNoAlertsAndUsesStaleCache(t *testing.T) {

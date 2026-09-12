@@ -725,3 +725,11 @@ func TestCFLTeamCatalogAndSportsRegistryUseStableProviderIDs(t *testing.T) {
 	require.ErrorAs(t, err, &sanitized)
 	assert.Equal(t, "sports_team_invalid", sanitized.Code)
 }
+
+func TestESPNTeamNormalizationPreservesTrustedProviderLogoURLs(t *testing.T) {
+	nba := nbaTeamFromPayload(espnTeamPayload{ID: "28", Logo: "https://a.espncdn.com/i/teamlogos/nba/500/tor.png"})
+	nfl := nflTeamFromPayload(espnTeamPayload{ID: "2", Logo: "https://a.espncdn.com/i/teamlogos/nfl/500/buf.png"})
+	assert.Equal(t, "https://a.espncdn.com/i/teamlogos/nba/500/tor.png", nba.ProviderLogoURL)
+	assert.Equal(t, "https://a.espncdn.com/i/teamlogos/nfl/500/buf.png", nfl.ProviderLogoURL)
+	assert.Empty(t, nbaTeamFromPayload(espnTeamPayload{ID: "28", Logo: "http://example.test/logo.png"}).ProviderLogoURL)
+}

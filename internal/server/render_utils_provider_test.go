@@ -36,6 +36,16 @@ type recordingSportsProvider struct {
 	err              error
 }
 
+type fixedLogoHydrator struct{}
+
+func (fixedLogoHydrator) Hydrate(_ context.Context, snapshot providers.SportsSnapshot) providers.SportsSnapshot {
+	snapshot.Games = append([]providers.Game(nil), snapshot.Games...)
+	if len(snapshot.Games) > 0 {
+		snapshot.Games[0].AwayTeam.LogoData = "normalized-logo"
+	}
+	return snapshot
+}
+
 func (provider *recordingSportsProvider) Teams(context.Context, providers.LeagueID) ([]providers.Team, error) {
 	return nil, provider.err
 }
@@ -98,6 +108,13 @@ func TestManagedMarketDataPreservesQuoteMetadataAndReportsInvalidSymbols(t *test
 	assert.Equal(t, []string{"not a symbol"}, provider.requests[1].Symbols)
 }
 
+func TestManagedMarketDataReportsSetupRequiredWithoutAnAdapter(t *testing.T) {
+	config := map[string]any{"credential_id": "market-primary", "symbols": "AAPL"}
+	(&Server{}).injectManagedProviderData(context.Background(), &data.Device{Username: "owner"}, &data.App{Name: "market-watch"}, config)
+	assert.NotContains(t, config, "$provider_data")
+	assert.JSONEq(t, `{"code":"provider_setup_required","message":"Market data setup is required on this server"}`, config["$provider_error"].(string))
+}
+
 func TestManagedWeatherDataInheritsDeviceLocationAndIsolatesCustomOverride(t *testing.T) {
 	provider := &recordingWeatherProvider{}
 	server := &Server{WeatherProvider: provider}
@@ -136,6 +153,20 @@ func TestManagedNHLDataUsesStableTeamIDAndDeviceTimezoneWithoutCredential(t *tes
 	assert.Equal(t, "America/Toronto", provider.scheduleRequests[0].Timezone)
 	assert.Contains(t, config, "$provider_data")
 	assert.NotContains(t, config, "credential_id")
+}
+
+func TestSportsRenderContractIncludesOnlyNormalizedLogoData(t *testing.T) {
+	snapshot := providers.SportsSnapshot{Games: []providers.Game{{
+		AwayTeam: providers.Team{Abbreviation: "TOR", ProviderLogoURL: "https://assets.nhle.com/tor.svg"},
+		HomeTeam: providers.Team{Abbreviation: "BOS"},
+	}}}
+	encoded := (&Server{SportsLogos: fixedLogoHydrator{}}).encodedSportsSnapshot(context.Background(), snapshot)
+	var decoded providers.SportsSnapshot
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	assert.Equal(t, "normalized-logo", decoded.Games[0].AwayTeam.LogoData)
+	assert.NotContains(t, string(encoded), "assets.nhle.com")
+	assert.NotContains(t, string(encoded), "providerLogoURL")
+	assert.Empty(t, snapshot.Games[0].AwayTeam.LogoData, "render enrichment must not mutate the provider snapshot")
 }
 
 func TestManagedNHLLiveAndLegacyRandomModesUseAllLiveGames(t *testing.T) {

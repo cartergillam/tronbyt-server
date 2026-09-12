@@ -210,6 +210,9 @@ func nbaTeamFromPayload(raw espnTeamPayload) Team {
 	if !ok {
 		return Team{}
 	}
+	if strings.HasPrefix(raw.Logo, "https://") {
+		team.ProviderLogoURL = raw.Logo
+	}
 	return team
 }
 

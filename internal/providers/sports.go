@@ -52,15 +52,27 @@ func (status GameStatus) Active() bool {
 }
 
 type Team struct {
-	ID              CanonicalTeamID `json:"id"`
-	ProviderID      ProviderTeamID  `json:"providerId"`
-	League          LeagueID        `json:"league"`
-	DisplayName     string          `json:"displayName"`
-	ShortName       string          `json:"shortName"`
-	Abbreviation    string          `json:"abbreviation"`
-	ProviderLogoURL string          `json:"providerLogoURL,omitempty"`
-	PrimaryColor    string          `json:"primaryColor,omitempty"`
-	SecondaryColor  string          `json:"secondaryColor,omitempty"`
+	ID           CanonicalTeamID `json:"id"`
+	ProviderID   ProviderTeamID  `json:"providerId"`
+	League       LeagueID        `json:"league"`
+	DisplayName  string          `json:"displayName"`
+	ShortName    string          `json:"shortName"`
+	Abbreviation string          `json:"abbreviation"`
+	// ProviderLogoURL is server-only acquisition metadata. Renderers receive
+	// LogoData or use their deterministic abbreviation/color fallback.
+	ProviderLogoURL string `json:"-"`
+	// LogoData is a small, server-normalized PNG encoded as base64. Pixlet never
+	// needs to contact a provider image host during rendering.
+	LogoData       string `json:"logoData,omitempty"`
+	PrimaryColor   string `json:"primaryColor,omitempty"`
+	SecondaryColor string `json:"secondaryColor,omitempty"`
+}
+
+// SportsLogoHydrator enriches normalized snapshots without making logo
+// availability part of sports-data correctness. Implementations must preserve
+// a usable snapshot when a logo cannot be loaded.
+type SportsLogoHydrator interface {
+	Hydrate(context.Context, SportsSnapshot) SportsSnapshot
 }
 
 type Game struct {

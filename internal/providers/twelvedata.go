@@ -143,8 +143,11 @@ func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return MarketQuote{}, SanitizedError{Code: "provider_rate_limited", Message: "Market data is temporarily rate limited", Retryable: true}
 	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	if resp.StatusCode == http.StatusUnauthorized {
 		return MarketQuote{}, SanitizedError{Code: "provider_credential_invalid", Message: "The market credential could not be validated", Retryable: false}
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return MarketQuote{}, SanitizedError{Code: "provider_entitlement_required", Message: "The market symbol is not available on this provider plan", Retryable: false}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return MarketQuote{}, TemporarilyUnavailable()
@@ -153,13 +156,15 @@ func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret
 		Symbol        string `json:"symbol"`
 		Name          string `json:"name"`
 		Exchange      string `json:"exchange"`
-		MIC           string `json:"mic"`
+		MIC           string `json:"mic_code"`
+		LegacyMIC     string `json:"mic"`
 		Currency      string `json:"currency"`
 		Close         string `json:"close"`
 		Change        string `json:"change"`
 		PercentChange string `json:"percent_change"`
 		Timestamp     int64  `json:"timestamp"`
 		LastUpdateAt  int64  `json:"last_update_at"`
+		LastQuoteAt   int64  `json:"last_quote_at"`
 		MarketOpen    bool   `json:"is_market_open"`
 		IsEOD         bool   `json:"is_eod"`
 		IsDelayed     bool   `json:"is_delayed"`
@@ -167,8 +172,23 @@ func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret
 		Code          int    `json:"code"`
 		Message       string `json:"message"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil || payload.Status == "error" || payload.Code != 0 {
-		if payload.Code == 400 || strings.Contains(strings.ToLower(payload.Message), "symbol") {
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return MarketQuote{}, SanitizedError{Code: "provider_response_invalid", Message: "Market data could not be read", Retryable: true}
+	}
+	if payload.Status == "error" || payload.Code != 0 {
+		lowerMessage := strings.ToLower(payload.Message)
+		switch payload.Code {
+		case http.StatusTooManyRequests:
+			return MarketQuote{}, SanitizedError{Code: "provider_rate_limited", Message: "Market data is temporarily rate limited", Retryable: true}
+		case http.StatusUnauthorized:
+			if containsAny(lowerMessage, "plan", "premium", "subscription", "not available", "access") {
+				return MarketQuote{}, SanitizedError{Code: "provider_entitlement_required", Message: "The market symbol is not available on this provider plan", Retryable: false}
+			}
+			return MarketQuote{}, SanitizedError{Code: "provider_credential_invalid", Message: "The market credential could not be validated", Retryable: false}
+		case http.StatusForbidden:
+			return MarketQuote{}, SanitizedError{Code: "provider_entitlement_required", Message: "The market symbol is not available on this provider plan", Retryable: false}
+		}
+		if payload.Code == http.StatusBadRequest || payload.Code == http.StatusNotFound || strings.Contains(lowerMessage, "symbol") {
 			return MarketQuote{}, SanitizedError{Code: "invalid_symbol", Message: "A market symbol is not available", Retryable: false}
 		}
 		return MarketQuote{}, TemporarilyUnavailable()
@@ -180,6 +200,9 @@ func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret
 		return MarketQuote{}, SanitizedError{Code: "provider_response_invalid", Message: "Market data could not be read", Retryable: true}
 	}
 	timestamp := payload.LastUpdateAt
+	if timestamp == 0 {
+		timestamp = payload.LastQuoteAt
+	}
 	if timestamp == 0 {
 		timestamp = payload.Timestamp
 	}
@@ -200,9 +223,13 @@ func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret
 	if strings.Contains(symbol, ":") && !strings.Contains(responseSymbol, ":") {
 		responseSymbol = symbol
 	}
+	mic := payload.MIC
+	if mic == "" {
+		mic = payload.LegacyMIC
+	}
 	return MarketQuote{
 		Symbol: responseSymbol, DisplayName: payload.Name, Price: price, AbsoluteChange: change,
-		PercentageChange: percentage, Exchange: payload.Exchange, MIC: payload.MIC, Currency: payload.Currency,
+		PercentageChange: percentage, Exchange: payload.Exchange, MIC: mic, Currency: payload.Currency,
 		MarketStatus: status, QuoteTimestamp: updated, ProviderUpdated: updated,
 		Delayed: payload.IsEOD || payload.IsDelayed,
 	}, nil

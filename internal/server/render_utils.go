@@ -118,7 +118,7 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 			return
 		}
 		if s.MarketProvider == nil {
-			setError(providers.TemporarilyUnavailable())
+			setError(providers.ProviderSetupRequired("Market data"))
 			return
 		}
 		symbols := providerSymbols(config["symbols"])
@@ -172,7 +172,7 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 				setError(err)
 				return
 			}
-			encoded, _ := json.Marshal(snapshot)
+			encoded := s.encodedSportsSnapshot(ctx, snapshot)
 			config["$provider_data"] = string(encoded)
 			return
 		}
@@ -184,7 +184,7 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 			setError(err)
 			return
 		}
-		encoded, _ := json.Marshal(snapshot)
+		encoded := s.encodedSportsSnapshot(ctx, snapshot)
 		config["$provider_data"] = string(encoded)
 	case "cfl-scores":
 		if s.SportsProvider == nil {
@@ -202,7 +202,7 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 				setError(err)
 				return
 			}
-			encoded, _ := json.Marshal(snapshot)
+			encoded := s.encodedSportsSnapshot(ctx, snapshot)
 			config["$sports_data"] = string(encoded)
 			return
 		}
@@ -212,7 +212,7 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 			setError(err)
 			return
 		}
-		encoded, _ := json.Marshal(snapshot)
+		encoded := s.encodedSportsSnapshot(ctx, snapshot)
 		config["$sports_data"] = string(encoded)
 	case "nba-live":
 		if s.SportsProvider == nil {
@@ -228,7 +228,7 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 				setError(err)
 				return
 			}
-			encoded, _ := json.Marshal(snapshot)
+			encoded := s.encodedSportsSnapshot(ctx, snapshot)
 			config["$sports_data"] = string(encoded)
 			return
 		}
@@ -240,7 +240,7 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 			setError(err)
 			return
 		}
-		encoded, _ := json.Marshal(snapshot)
+		encoded := s.encodedSportsSnapshot(ctx, snapshot)
 		config["$sports_data"] = string(encoded)
 	case "nfl-live":
 		if s.SportsProvider == nil {
@@ -256,7 +256,7 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 				setError(err)
 				return
 			}
-			encoded, _ := json.Marshal(snapshot)
+			encoded := s.encodedSportsSnapshot(ctx, snapshot)
 			config["$sports_data"] = string(encoded)
 			return
 		}
@@ -268,9 +268,17 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 			setError(err)
 			return
 		}
-		encoded, _ := json.Marshal(snapshot)
+		encoded := s.encodedSportsSnapshot(ctx, snapshot)
 		config["$sports_data"] = string(encoded)
 	}
+}
+
+func (s *Server) encodedSportsSnapshot(ctx context.Context, snapshot providers.SportsSnapshot) []byte {
+	if s.SportsLogos != nil {
+		snapshot = s.SportsLogos.Hydrate(ctx, snapshot)
+	}
+	encoded, _ := json.Marshal(snapshot)
+	return encoded
 }
 
 func providerTeamID(value any) providers.ProviderTeamID {

@@ -59,6 +59,7 @@ type Server struct {
 	MarketProvider  providers.MarketProvider
 	WeatherProvider providers.WeatherProvider
 	SportsProvider  providers.SportsProvider
+	SportsLogos     providers.SportsLogoHydrator
 
 	systemAppsCache      []apps.AppMetadata
 	systemAppsCacheMutex sync.RWMutex
@@ -137,6 +138,7 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 			providers.LeagueNFL: espnSports,
 			providers.LeagueMLB: mlbSports,
 		}),
+		SportsLogos: providers.NewSportsLogoCache(nil),
 	}
 	if cfg.ProviderCredentialMasterKey != "" {
 		store, err := credentials.NewStore(db, cfg.ProviderCredentialMasterKey)

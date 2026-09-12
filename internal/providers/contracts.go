@@ -161,6 +161,10 @@ func MissingCredential(provider string) error {
 	return SanitizedError{Code: "provider_credential_missing", Message: provider + " is not configured on this server", Retryable: false}
 }
 
+func ProviderSetupRequired(provider string) error {
+	return SanitizedError{Code: "provider_setup_required", Message: provider + " setup is required on this server", Retryable: false}
+}
+
 func TemporarilyUnavailable() error {
 	return SanitizedError{Code: "provider_temporarily_unavailable", Message: "Provider data is temporarily unavailable", Retryable: true}
 }
