@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -119,9 +120,23 @@ type SportsSnapshot struct {
 	DeviceTimezone string     `json:"deviceTimezone"`
 	Games          []Game     `json:"games"`
 	NextGame       *Game      `json:"nextGame,omitempty"`
-	UpcomingGames  []Game     `json:"upcomingGames,omitempty"`
+	UpcomingGames  []Game     `json:"upcomingGames"`
 	FreshAsOf      time.Time  `json:"freshAsOf"`
 	Stale          bool       `json:"stale"`
+}
+
+// MarshalJSON keeps the render contract collection-shaped even when an
+// adapter has no games. Pixlet consumers still defensively accept legacy null
+// and absent values, but new server responses always provide empty arrays.
+func (snapshot SportsSnapshot) MarshalJSON() ([]byte, error) {
+	type wire SportsSnapshot
+	if snapshot.Games == nil {
+		snapshot.Games = []Game{}
+	}
+	if snapshot.UpcomingGames == nil {
+		snapshot.UpcomingGames = []Game{}
+	}
+	return json.Marshal(wire(snapshot))
 }
 
 type SportsScheduleRequest struct {

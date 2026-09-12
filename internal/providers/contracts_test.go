@@ -24,6 +24,18 @@ func TestMarketContractLimitsSymbols(t *testing.T) {
 	assert.Error(t, (MarketRequest{Symbols: []string{"1", "2", "3", "4", "5", "6"}}).Validate())
 }
 
+func TestSportsSnapshotJSONUsesEmptyArraysForAbsentCollections(t *testing.T) {
+	encoded, err := json.Marshal(SportsSnapshot{League: LeagueNFL})
+	require.NoError(t, err)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &payload))
+	assert.Equal(t, []any{}, payload["games"])
+	assert.Equal(t, []any{}, payload["upcomingGames"])
+	assert.NotContains(t, string(encoded), `"games":null`)
+	assert.NotContains(t, string(encoded), `"upcomingGames":null`)
+	assert.NotContains(t, string(encoded), `"nextGame":null`)
+}
+
 func TestProviderCacheSharesFreshDataAndPreservesStaleData(t *testing.T) {
 	cache := NewCache[string](10 * time.Millisecond)
 	calls := 0
