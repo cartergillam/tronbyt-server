@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"tronbyt-server/internal/providers"
 
 	"tronbyt-server/internal/apps"
 	"tronbyt-server/internal/data"
@@ -791,6 +792,17 @@ func validateConfigPatch(schema normalizedSchema, existing, patch map[string]any
 		if field.Required {
 			if value, ok := result[field.Key]; !ok || value == nil || value == "" {
 				fieldErrors[field.Key] = "is required"
+			}
+		}
+	}
+	if findSchemaField(schema, "watchlist") != nil && findSchemaField(schema, "symbols") != nil {
+		if raw, ok := result["watchlist"].(string); ok && strings.TrimSpace(raw) != "" {
+			listings, err := providers.ParseMarketWatchlist(raw)
+			if err != nil {
+				fieldErrors["watchlist"] = err.Error()
+			} else {
+				encoded, _ := json.Marshal(listings)
+				result["watchlist"] = string(encoded)
 			}
 		}
 	}

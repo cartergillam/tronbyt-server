@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -32,6 +33,11 @@ type TwelveDataAdapter struct {
 	Client       *http.Client
 	BaseURL      string
 	Cache        *Cache[[]MarketQuote]
+	SearchCache  *Cache[[]MarketListing]
+	LogoCache    *Cache[string]
+	LogoImages   *marketLogoImages
+	searchMu     sync.Mutex
+	searchLast   map[string]time.Time
 	backoffMu    sync.Mutex
 	backoffUntil map[string]time.Time
 	failureMu    sync.Mutex
@@ -47,6 +53,10 @@ func NewTwelveDataAdapter(credentials CredentialResolver, client *http.Client) *
 		// Five minutes prevents a device polling every few seconds from spending
 		// a Basic-plan quote credit on every render after an upstream failure.
 		Cache:        NewCache[[]MarketQuote](marketOpenFreshTTL),
+		SearchCache:  NewCache[[]MarketListing](time.Second),
+		LogoCache:    NewCache[string](time.Minute),
+		LogoImages:   newMarketLogoImages(client),
+		searchLast:   make(map[string]time.Time),
 		backoffUntil: make(map[string]time.Time),
 		failures:     make(map[string]marketFailure),
 	}
@@ -60,6 +70,15 @@ func (adapter *TwelveDataAdapter) Quotes(ctx context.Context, request MarketRequ
 	for _, symbol := range request.Symbols {
 		value, _ := NormalizeMarketSymbol(symbol)
 		normalized = append(normalized, value)
+	}
+	listings := request.Listings
+	if listings != nil {
+		raw, _ := json.Marshal(listings)
+		listings, _ = ParseMarketWatchlist(string(raw))
+		normalized = nil
+		for _, listing := range listings {
+			normalized = append(normalized, listing.ID+":"+listing.Currency)
+		}
 	}
 	key := request.ScopeType + ":" + request.ScopeID + ":" + request.CredentialID + ":" + strings.Join(normalized, ",")
 	backoffKey := request.ScopeType + ":" + request.ScopeID + ":" + request.CredentialID
@@ -75,8 +94,22 @@ func (adapter *TwelveDataAdapter) Quotes(ctx context.Context, request MarketRequ
 			return nil, 0, MissingCredential("Market data")
 		}
 		result := make([]MarketQuote, 0, len(normalized))
-		for _, symbol := range normalized {
-			quote, err := adapter.fetchQuote(ctx, symbol, secret)
+		for index, symbol := range normalized {
+			var quote MarketQuote
+			var err error
+			if listings != nil {
+				quote, err = adapter.fetchListingQuote(ctx, listings[index], secret)
+			} else {
+				quote, err = adapter.fetchQuote(ctx, symbol, secret)
+			}
+			if err != nil && listings != nil {
+				var classified SanitizedError
+				if errors.As(err, &classified) && (classified.Code == "provider_entitlement_required" || classified.Code == "invalid_symbol" || classified.Code == "listing_mismatch") {
+					listing := listings[index]
+					result = append(result, MarketQuote{ListingID: listing.ID, Symbol: listing.Symbol, DisplayName: listing.Name, Exchange: listing.Exchange, MIC: listing.MIC, Currency: listing.Currency, ErrorCode: classified.Code, MarketStatus: MarketUnknown})
+					continue
+				}
+			}
 			if err != nil {
 				adapter.recordBackoff(backoffKey, err)
 				return nil, 0, err
@@ -103,7 +136,7 @@ func (adapter *TwelveDataAdapter) Quotes(ctx context.Context, request MarketRequ
 
 func quoteFreshTTL(quotes []MarketQuote) time.Duration {
 	for _, quote := range quotes {
-		if quote.MarketStatus == MarketOpen {
+		if quote.MarketStatus == MarketOpen || quote.ErrorCode != "" {
 			return marketOpenFreshTTL
 		}
 	}
@@ -146,13 +179,50 @@ func (adapter *TwelveDataAdapter) ValidateCredential(ctx context.Context, id, sc
 }
 
 func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret string) (MarketQuote, error) {
+	return adapter.fetchQuoteWithQuery(ctx, symbol, url.Values{"symbol": {symbol}}, secret)
+}
+
+func (adapter *TwelveDataAdapter) fetchListingQuote(ctx context.Context, listing MarketListing, secret string) (MarketQuote, error) {
+	if listing.MIC == "" && listing.Currency == "" {
+		symbol := listing.Symbol
+		if listing.Exchange != "" {
+			symbol += ":" + listing.Exchange
+		}
+		quote, err := adapter.fetchQuote(ctx, symbol, secret)
+		quote.ListingID = listing.ID
+		return quote, err
+	}
+	quote, err := adapter.fetchQuoteWithQuery(ctx, listing.Symbol, listingQuery(listing), secret)
+	if err != nil {
+		return quote, err
+	}
+	// Never accept an automatic venue or currency substitution for an explicit selection.
+	if !strings.EqualFold(strings.Split(quote.Symbol, ":")[0], listing.Symbol) ||
+		(listing.MIC != "" && !strings.EqualFold(quote.MIC, listing.MIC)) ||
+		(listing.MIC == "" && listing.Exchange != "" && !strings.EqualFold(quote.Exchange, listing.Exchange)) ||
+		(listing.Currency != "" && !strings.EqualFold(quote.Currency, listing.Currency)) {
+		return MarketQuote{}, SanitizedError{Code: "listing_mismatch", Message: "The provider returned a different listing", Retryable: false}
+	}
+	quote.ListingID = listing.ID
+	return quote, nil
+}
+
+func listingQuery(listing MarketListing) url.Values {
+	query := url.Values{"symbol": {listing.Symbol}}
+	if listing.MIC != "" {
+		query.Set("mic_code", listing.MIC)
+	} else if listing.Exchange != "" {
+		query.Set("exchange", listing.Exchange)
+	}
+	return query
+}
+
+func (adapter *TwelveDataAdapter) fetchQuoteWithQuery(ctx context.Context, symbol string, query url.Values, secret string) (MarketQuote, error) {
 	secret = strings.TrimSpace(secret)
 	if secret == "" {
 		return MarketQuote{}, MissingCredential("Market data")
 	}
 	endpoint, _ := url.Parse(strings.TrimRight(adapter.BaseURL, "/") + "/quote")
-	query := endpoint.Query()
-	query.Set("symbol", symbol)
 	endpoint.RawQuery = query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
@@ -197,7 +267,7 @@ func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret
 	price, priceErr := strconv.ParseFloat(payload.Close, 64)
 	change, changeErr := strconv.ParseFloat(payload.Change, 64)
 	percentage, percentageErr := strconv.ParseFloat(payload.PercentChange, 64)
-	if priceErr != nil || changeErr != nil || percentageErr != nil || payload.Symbol == "" {
+	if priceErr != nil || changeErr != nil || percentageErr != nil || math.IsNaN(price) || math.IsNaN(change) || math.IsNaN(percentage) || math.IsInf(price, 0) || math.IsInf(change, 0) || math.IsInf(percentage, 0) || payload.Symbol == "" {
 		return MarketQuote{}, SanitizedError{Code: "provider_response_invalid", Message: "Market data could not be read", Retryable: true}
 	}
 	timestamp := payload.LastUpdateAt
@@ -232,7 +302,7 @@ func (adapter *TwelveDataAdapter) fetchQuote(ctx context.Context, symbol, secret
 		Symbol: responseSymbol, DisplayName: payload.Name, Price: price, AbsoluteChange: change,
 		PercentageChange: percentage, Exchange: payload.Exchange, MIC: mic, Currency: payload.Currency,
 		MarketStatus: status, QuoteTimestamp: updated, ProviderUpdated: updated,
-		Delayed: payload.IsEOD || payload.IsDelayed,
+		Delayed: payload.IsEOD || payload.IsDelayed, EOD: payload.IsEOD,
 	}, nil
 }
 

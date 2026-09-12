@@ -1469,6 +1469,7 @@ func (s *Server) SetupAPIRoutes() {
 	s.Router.Handle("POST /v0/household/members", s.APIAuthMiddleware(s.RequireOwnerAPI(s.handleCreateHouseholdMember)))
 	s.Router.Handle("POST /v0/household/members/{memberID}/pairing-codes", s.APIAuthMiddleware(s.RequireOwnerAPI(s.handleCreatePairingCode)))
 	s.Router.Handle("DELETE /v0/mobile-sessions/{sessionID}", s.APIAuthMiddleware(s.RequireOwnerAPI(s.handleRevokeMobileSession)))
+	s.Router.Handle("GET /v0/devices/{id}/market/search", s.APIAuthMiddleware(s.RequireMobileControlAPI(s.RequireDevice(s.handleMarketSearch))))
 	s.Router.Handle("PUT /v0/provider-credentials/{credentialID}", s.APIAuthMiddleware(s.RequireOwnerAPI(s.handlePutProviderCredential)))
 	s.Router.Handle("GET /v0/provider-credentials/{credentialID}", s.APIAuthMiddleware(s.RequireOwnerAPI(s.handleGetProviderCredentialMetadata)))
 	s.Router.Handle("GET /v0/provider-credentials", s.APIAuthMiddleware(s.RequireOwnerAPI(s.handleListProviderCredentials)))

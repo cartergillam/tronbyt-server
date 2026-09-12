@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"tronbyt-server/internal/providers"
 
 	"tronbyt-server/internal/data"
 	"tronbyt-server/internal/version"
@@ -394,6 +395,9 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Provisioning != nil {
 		response.Features = append(response.Features, "household-pairing-v1", "starter-bundles-v1")
+	}
+	if _, ok := s.MarketProvider.(providers.MarketSearcher); ok {
+		response.Features = append(response.Features, "market-watch-v2")
 	}
 	if s.CredentialStore != nil {
 		response.Features = append(response.Features, "managed-provider-credentials-v1")

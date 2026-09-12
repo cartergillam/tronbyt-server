@@ -55,7 +55,7 @@ func TestSportsLogoCacheNormalizesCachesAndHydratesEverySnapshotLocation(t *test
 	imageValue, format, err := image.Decode(bytes.NewReader(decoded))
 	require.NoError(t, err)
 	assert.Equal(t, "png", format)
-	assert.Equal(t, image.Rect(0, 0, 16, 16), imageValue.Bounds())
+	assert.Equal(t, image.Rect(0, 0, 20, 20), imageValue.Bounds())
 	_, _, _, cornerAlpha := imageValue.At(0, 0).RGBA()
 	_, _, _, centerAlpha := imageValue.At(8, 8).RGBA()
 	assert.Zero(t, cornerAlpha, "aspect-fit padding remains transparent")

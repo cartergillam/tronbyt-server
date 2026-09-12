@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
@@ -19,6 +20,10 @@ const (
 )
 
 type MarketQuote struct {
+	ListingID        string       `json:"listingID,omitempty"`
+	LogoData         string       `json:"logoData,omitempty"`
+	ErrorCode        string       `json:"errorCode,omitempty"`
+	EOD              bool         `json:"eod,omitempty"`
 	Symbol           string       `json:"symbol"`
 	DisplayName      string       `json:"displayName"`
 	Price            float64      `json:"price"`
@@ -39,6 +44,7 @@ type MarketQuote struct {
 
 type MarketRequest struct {
 	Symbols      []string
+	Listings     []MarketListing
 	CredentialID string
 	ScopeType    string
 	ScopeID      string
@@ -55,6 +61,11 @@ func NormalizeMarketSymbol(value string) (string, error) {
 }
 
 func (request MarketRequest) Validate() error {
+	if request.Listings != nil {
+		raw, _ := json.Marshal(request.Listings)
+		_, err := ParseMarketWatchlist(string(raw))
+		return err
+	}
 	if len(request.Symbols) == 0 || len(request.Symbols) > MaxMarketSymbols {
 		return SanitizedError{Code: "market_symbol_limit", Message: "Choose between 1 and 5 market symbols", Retryable: false}
 	}

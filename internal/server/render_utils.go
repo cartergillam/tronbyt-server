@@ -61,6 +61,13 @@ func (s *Server) RenderApp(ctx context.Context, device *data.Device, app *data.A
 		appInterval = 15 // Default fallback if no device context
 	}
 
+	// Encode a complete bounded ticker loop even when this installation's dwell
+	// is short. This affects only Market Watch; the device animation flag remains
+	// the existing app-level setting.
+	if app != nil && app.Name == "market-watch" && config["display_mode"] == "ticker" {
+		appInterval = max(appInterval, 30)
+	}
+
 	// Filters
 	var filters []string
 	if device != nil {
@@ -122,10 +129,22 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 			return
 		}
 		symbols := providerSymbols(config["symbols"])
-		quotes, err := s.MarketProvider.Quotes(ctx, providers.MarketRequest{Symbols: symbols, CredentialID: credentialID, ScopeType: "server_owner", ScopeID: device.Username})
+		request := providers.MarketRequest{Symbols: symbols, CredentialID: credentialID, ScopeType: "server_owner", ScopeID: device.Username}
+		if raw, ok := config["watchlist"].(string); ok && strings.TrimSpace(raw) != "" {
+			listings, err := providers.ParseMarketWatchlist(raw)
+			if err != nil {
+				setError(providers.SanitizedError{Code: "invalid_symbol", Message: "Choose between 1 and 5 distinct listings"})
+				return
+			}
+			request.Listings = listings
+		}
+		quotes, err := s.MarketProvider.Quotes(ctx, request)
 		if err != nil {
 			setError(err)
 			return
+		}
+		if logos, ok := s.MarketProvider.(providers.MarketLogoHydrator); ok {
+			quotes = logos.HydrateQuotes(ctx, request, quotes)
 		}
 		encoded, _ := json.Marshal(quotes)
 		config["$provider_data"] = string(encoded)

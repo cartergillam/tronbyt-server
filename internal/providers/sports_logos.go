@@ -7,10 +7,12 @@ import (
 	"errors"
 	"image"
 	"image/draw"
+	_ "image/jpeg"
 	"image/png"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +24,7 @@ import (
 )
 
 const (
-	sportsLogoSize       = 16
+	sportsLogoSize       = 20
 	sportsLogoMaxBytes   = 512 * 1024
 	sportsLogoFreshTTL   = 7 * 24 * time.Hour
 	sportsLogoStaleTTL   = 30 * 24 * time.Hour
@@ -65,6 +67,10 @@ func (cache *SportsLogoCache) Hydrate(ctx context.Context, snapshot SportsSnapsh
 		return result
 	}
 
+	size := sportsLogoSize
+	if snapshot.League == LeagueMLB {
+		size = 16
+	} // Preserve the existing MLB asset contract.
 	logos := make(map[string]string, len(urls))
 	var mu sync.Mutex
 	var group sync.WaitGroup
@@ -73,8 +79,8 @@ func (cache *SportsLogoCache) Hydrate(ctx context.Context, snapshot SportsSnapsh
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			data, _, err := cache.Cache.Get(ctx, logoURL, sportsLogoFreshTTL, sportsLogoStaleTTL, func(ctx context.Context) (string, error) {
-				return cache.fetch(ctx, logoURL)
+			data, _, err := cache.Cache.Get(ctx, strconv.Itoa(size)+":"+logoURL, sportsLogoFreshTTL, sportsLogoStaleTTL, func(ctx context.Context) (string, error) {
+				return cache.fetchSize(ctx, logoURL, size)
 			})
 			if err == nil && data != "" {
 				mu.Lock()
@@ -89,6 +95,10 @@ func (cache *SportsLogoCache) Hydrate(ctx context.Context, snapshot SportsSnapsh
 }
 
 func (cache *SportsLogoCache) fetch(ctx context.Context, logoURL string) (string, error) {
+	return cache.fetchSize(ctx, logoURL, sportsLogoSize)
+}
+
+func (cache *SportsLogoCache) fetchSize(ctx context.Context, logoURL string, size int) (string, error) {
 	if !allowedSportsLogoURL(logoURL) {
 		return "", errors.New("sports logo host is not allowed")
 	}
@@ -111,7 +121,7 @@ func (cache *SportsLogoCache) fetch(ctx context.Context, logoURL string) (string
 	if err != nil || len(body) == 0 || len(body) > sportsLogoMaxBytes {
 		return "", errors.New("sports logo response was invalid")
 	}
-	normalized, err := normalizeSportsLogo(body, resp.Header.Get("Content-Type"))
+	normalized, err := normalizeLogoAtSize(body, resp.Header.Get("Content-Type"), size)
 	if err != nil {
 		return "", err
 	}
@@ -129,24 +139,48 @@ func allowedSportsLogoURL(value string) bool {
 }
 
 func normalizeSportsLogo(body []byte, contentType string) ([]byte, error) {
-	canvas := image.NewRGBA(image.Rect(0, 0, sportsLogoSize, sportsLogoSize))
+	return normalizeLogoAtSize(body, contentType, sportsLogoSize)
+}
+
+func normalizeLogoAtSize(body []byte, contentType string, size int) ([]byte, error) {
+	canvas := image.NewRGBA(image.Rect(0, 0, size, size))
 	if strings.Contains(strings.ToLower(contentType), "svg") || bytes.Contains(bytes.ToLower(body[:min(len(body), 256)]), []byte("<svg")) {
 		icon, err := oksvg.ReadIconStream(bytes.NewReader(body))
 		if err != nil || icon.ViewBox.W <= 0 || icon.ViewBox.H <= 0 {
 			return nil, errors.New("sports SVG logo could not be decoded")
 		}
-		width, height := fitLogoSize(icon.ViewBox.W, icon.ViewBox.H)
-		icon.SetTarget(float64((sportsLogoSize-width)/2), float64((sportsLogoSize-height)/2), float64(width), float64(height))
-		scanner := rasterx.NewScannerGV(sportsLogoSize, sportsLogoSize, canvas, canvas.Bounds())
-		icon.Draw(rasterx.NewDasher(sportsLogoSize, sportsLogoSize, scanner), 1)
+		rasterSize := size
+		if size != 16 {
+			rasterSize = 160
+		}
+		raster := image.NewRGBA(image.Rect(0, 0, rasterSize, rasterSize))
+		width, height := fitLogoSizeAt(icon.ViewBox.W, icon.ViewBox.H, rasterSize)
+		icon.SetTarget(float64((rasterSize-width)/2), float64((rasterSize-height)/2), float64(width), float64(height))
+		scanner := rasterx.NewScannerGV(rasterSize, rasterSize, raster, raster.Bounds())
+		icon.Draw(rasterx.NewDasher(rasterSize, rasterSize, scanner), 1)
+		sourceBounds := raster.Bounds()
+		if size != 16 {
+			sourceBounds = usefulLogoBounds(raster)
+		}
+		width, height = fitLogoSizeAt(float64(sourceBounds.Dx()), float64(sourceBounds.Dy()), size)
+		target := image.Rect((size-width)/2, (size-height)/2, (size-width)/2+width, (size-height)/2+height)
+		xdraw.CatmullRom.Scale(canvas, target, raster, sourceBounds, draw.Over, nil)
 	} else {
+		info, _, err := image.DecodeConfig(bytes.NewReader(body))
+		if err != nil || info.Width > 4096 || info.Height > 4096 {
+			return nil, errors.New("logo dimensions exceed limit")
+		}
 		source, _, err := image.Decode(bytes.NewReader(body))
 		if err != nil || source.Bounds().Dx() <= 0 || source.Bounds().Dy() <= 0 {
 			return nil, errors.New("sports raster logo could not be decoded")
 		}
-		width, height := fitLogoSize(float64(source.Bounds().Dx()), float64(source.Bounds().Dy()))
-		target := image.Rect((sportsLogoSize-width)/2, (sportsLogoSize-height)/2, (sportsLogoSize-width)/2+width, (sportsLogoSize-height)/2+height)
-		xdraw.CatmullRom.Scale(canvas, target, source, source.Bounds(), draw.Over, nil)
+		sourceBounds := source.Bounds()
+		if size != 16 {
+			sourceBounds = usefulLogoBounds(source)
+		}
+		width, height := fitLogoSizeAt(float64(sourceBounds.Dx()), float64(sourceBounds.Dy()), size)
+		target := image.Rect((size-width)/2, (size-height)/2, (size-width)/2+width, (size-height)/2+height)
+		xdraw.CatmullRom.Scale(canvas, target, source, sourceBounds, draw.Over, nil)
 	}
 	var encoded bytes.Buffer
 	if err := png.Encode(&encoded, canvas); err != nil {
@@ -156,10 +190,14 @@ func normalizeSportsLogo(body []byte, contentType string) ([]byte, error) {
 }
 
 func fitLogoSize(width, height float64) (int, int) {
+	return fitLogoSizeAt(width, height, sportsLogoSize)
+}
+
+func fitLogoSizeAt(width, height float64, size int) (int, int) {
 	if width >= height {
-		return sportsLogoSize, max(1, int(height/width*sportsLogoSize))
+		return size, max(1, int(height/width*float64(size)))
 	}
-	return max(1, int(width/height*sportsLogoSize)), sportsLogoSize
+	return max(1, int(width/height*float64(size))), size
 }
 
 func cloneSportsSnapshot(snapshot SportsSnapshot) SportsSnapshot {
@@ -210,4 +248,22 @@ func applySportsLogos(snapshot *SportsSnapshot, logos map[string]string) {
 		apply(&snapshot.NextGame.AwayTeam)
 		apply(&snapshot.NextGame.HomeTeam)
 	}
+}
+
+// Provider PNGs often contain wide transparent margins. Fit the artwork itself.
+func usefulLogoBounds(source image.Image) image.Rectangle {
+	bounds := source.Bounds()
+	useful := image.Rectangle{}
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			_, _, _, alpha := source.At(x, y).RGBA()
+			if alpha > 0x0800 {
+				useful = useful.Union(image.Rect(x, y, x+1, y+1))
+			}
+		}
+	}
+	if useful.Empty() {
+		return bounds
+	}
+	return useful
 }
