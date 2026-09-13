@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	marketOpenFreshTTL     = 3 * time.Minute
+	marketOpenFreshTTL     = 5 * time.Minute
 	marketClosedFreshTTL   = 60 * time.Minute
 	marketStaleTTL         = 72 * time.Hour
 	marketRateLimitBackoff = 15 * time.Minute
@@ -268,6 +268,11 @@ func twelveDataError(httpStatus, providerCode int, status, message string) error
 		code = httpStatus
 	}
 	lowerMessage := strings.ToLower(message)
+	// Entitlement can be reported as a 400/404, including a valid Canadian listing.
+	if code != http.StatusTooManyRequests && containsAny(lowerMessage, "upgrade", "subscription", "premium", "plan", "not included", "not available on", "access to this") {
+		return SanitizedError{Code: "provider_entitlement_required", Message: "The market symbol is not available on this provider plan", Retryable: false}
+	}
+
 	switch code {
 	case http.StatusTooManyRequests:
 		return SanitizedError{Code: "provider_rate_limited", Message: "Market data is temporarily rate limited", Retryable: true}
@@ -290,6 +295,10 @@ func twelveDataError(httpStatus, providerCode int, status, message string) error
 func (adapter *TwelveDataAdapter) recordFailure(key string, err error) {
 	adapter.failureMu.Lock()
 	retry := marketFailureRetry
+	var deferred marketCreditDeferred
+	if errors.As(err, &deferred) {
+		retry = time.Minute
+	}
 	var classified SanitizedError
 	if errors.As(err, &classified) && !classified.Retryable {
 		retry = 24 * time.Hour

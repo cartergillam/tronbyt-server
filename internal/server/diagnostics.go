@@ -400,7 +400,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		response.Features = append(response.Features, "market-watch-v2")
 	}
 	if s.CredentialStore != nil {
-		response.Features = append(response.Features, "managed-provider-credentials-v1")
+		response.Features = append(response.Features, "managed-provider-credentials-v1", "device-market-credentials-v1")
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, max-age=300")

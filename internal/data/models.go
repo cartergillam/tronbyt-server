@@ -578,6 +578,7 @@ type App struct {
 }
 
 type Device struct {
+	MarketCredentialID     string      `gorm:"size:96" json:"-"`
 	ID                     string      `gorm:"primaryKey"                          json:"id"` // 8-char hex
 	Username               string      `gorm:"index"                               json:"username"`
 	Name                   string      `json:"name"`

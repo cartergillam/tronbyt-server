@@ -3,10 +3,12 @@ package providers
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/draw"
 	"image/png"
@@ -26,8 +28,39 @@ var approvedMarketLogos = map[string]string{
 	"twelvedata:MSFT:XNAS": "microsoft.svg",
 }
 
+const marketLogoNormalizationVersion = "market-logo-v3"
+
+// Includes all embedded assets: any curated edit invalidates only Market Watch
+// logos and render output, never quote snapshots or unrelated app caches.
+func MarketLogoRevision() string {
+	bodies := [][]byte{}
+	for _, name := range []string{"apple.svg", "microsoft.svg"} {
+		body, _ := marketLogoOverrides.ReadFile("market_logo_overrides/" + name)
+		bodies = append(bodies, body)
+	}
+	return marketLogoFingerprint(marketLogoNormalizationVersion, bodies...)
+}
+
+func marketLogoFingerprint(version string, bodies ...[]byte) string {
+	hash := sha256.New()
+	hash.Write([]byte(version))
+	for _, body := range bodies {
+		hash.Write(body)
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)[:8])
+}
+func approvedMarketLogoName(listing MarketListing) string {
+	id := listing.ID
+	// NASDAQ's market segments are distinct listing IDs but share these marks.
+	for _, mic := range []string{"XNGS", "XNMS", "XNCM"} {
+		if strings.HasSuffix(id, ":"+mic) {
+			id = strings.TrimSuffix(id, ":"+mic) + ":XNAS"
+		}
+	}
+	return approvedMarketLogos[id]
+}
 func bundledMarketLogo(listing MarketListing) string {
-	name := approvedMarketLogos[listing.ID]
+	name := approvedMarketLogoName(listing)
 	if name == "" || listing.Currency != "USD" {
 		return ""
 	}
@@ -108,10 +141,17 @@ func (adapter *TwelveDataAdapter) HydrateQuotes(ctx context.Context, request Mar
 		if err != nil {
 			continue
 		}
+		if approvedMarketLogoName(listing) != "" && listing.Currency == "USD" {
+			key := "curated:" + listing.ID + ":" + MarketLogoRevision()
+			logo, _, _ := adapter.LogoCache.Get(ctx, key, 365*24*time.Hour, 365*24*time.Hour, func(context.Context) (string, error) { return bundledMarketLogo(listing), nil })
+			result[index].LogoData = logo
+			result[index].LogoVersion = MarketLogoRevision()
+			continue
+		}
 		group.Add(1)
 		go func(index int, listing MarketListing) {
 			defer group.Done()
-			key := request.ScopeType + ":" + request.ScopeID + ":" + request.CredentialID + ":" + listing.ID
+			key := request.ScopeType + ":" + request.ScopeID + ":" + request.CredentialID + ":" + listing.ID + ":" + MarketLogoRevision()
 			logo, _, _ := adapter.LogoCache.GetWithTTL(ctx, key, 30*24*time.Hour, func(ctx context.Context) (string, time.Duration, error) {
 				if logo := bundledMarketLogo(listing); logo != "" {
 					return logo, 365 * 24 * time.Hour, nil
@@ -137,6 +177,7 @@ func (adapter *TwelveDataAdapter) HydrateQuotes(ctx context.Context, request Mar
 				return data, 30 * 24 * time.Hour, err
 			})
 			result[index].LogoData = logo
+			result[index].LogoVersion = MarketLogoRevision()
 		}(index, listing)
 	}
 	group.Wait()

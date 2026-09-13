@@ -100,3 +100,33 @@ func TestCredentialListDisableEnableAndDelete(t *testing.T) {
 	_, err = store.Metadata(ctx, "weather", "server_owner", "owner")
 	assert.Error(t, err)
 }
+
+func TestOwnerMultipleMarketLabelsAndVersionedCacheScopes(t *testing.T) {
+	store, db := testStore(t)
+	for _, id := range []string{"carter-market", "ben-market"} {
+		m, err := store.Put(t.Context(), id, "twelve-data", "server_owner", "owner", "offline-test", id+" label")
+		require.NoError(t, err)
+		require.Equal(t, id+" label", m.Label)
+	}
+	items, err := store.List(t.Context(), "server_owner", "owner")
+	require.NoError(t, err)
+	require.Len(t, items, 2)
+	before, err := store.CredentialCacheScope(t.Context(), "ben-market", "server_owner", "owner")
+	require.NoError(t, err)
+	_, err = store.Put(t.Context(), "ben-market", "twelve-data", "server_owner", "owner", "offline-replacement")
+	require.NoError(t, err)
+	after, err := store.CredentialCacheScope(t.Context(), "ben-market", "server_owner", "owner")
+	require.NoError(t, err)
+	require.NotEqual(t, before, after)
+	_, err = store.SetEnabled(t.Context(), "ben-market", "server_owner", "owner", false)
+	require.NoError(t, err)
+	_, err = store.CredentialCacheScope(t.Context(), "ben-market", "server_owner", "owner")
+	require.ErrorIs(t, err, ErrCredentialDisabled)
+	var record data.ProviderCredential
+	require.NoError(t, db.First(&record, "id = ?", "carter-market").Error)
+	raw, err := json.Marshal(record)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "offline-test")
+	assert.NotContains(t, string(raw), "ciphertext")
+	assert.NotContains(t, string(raw), "nonce")
+}

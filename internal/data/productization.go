@@ -6,6 +6,7 @@ import "time"
 // master key is deliberately external to the database and this model never
 // serializes encrypted material through an API response.
 type ProviderCredential struct {
+	Label           string     `gorm:"size:128" json:"label"`
 	ID              string     `gorm:"primaryKey;size:96" json:"id"`
 	Provider        string     `gorm:"index;size:64" json:"provider"`
 	ScopeType       string     `gorm:"index:idx_provider_scope,priority:1;size:24" json:"scopeType"`

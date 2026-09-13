@@ -968,6 +968,10 @@ func (s *Server) handleInstallationConfigPatch(w http.ResponseWriter, r *http.Re
 		writeAPIError(w, http.StatusConflict, "stale_state", "Device state changed before this configuration was applied", nil)
 		return
 	}
+	if memberMarketCredentialChangeForbidden(r, app.Name, app.Config, request.Config) {
+		writeAPIError(w, 403, "owner_required", "Only the owner can change market credentials", nil)
+		return
+	}
 	updated, fieldErrors := validateConfigPatch(schema, app.Config, request.Config)
 	if len(fieldErrors) > 0 {
 		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_config", "Configuration validation failed", fieldErrors)
@@ -993,7 +997,7 @@ func (s *Server) handleInstallationConfigPatch(w http.ResponseWriter, r *http.Re
 	device.LastMutationResult = "configuration_updated"
 	contextApp := *app
 	contextApp.Config = updated
-	contextHash := renderContextHash(device, &contextApp)
+	contextHash := s.marketRenderContextHash(r.Context(), device, &contextApp)
 	err = s.DB.Transaction(func(tx *gorm.DB) error {
 		update := data.App{
 			Config: updated, LastRender: now,
@@ -1107,6 +1111,10 @@ func (s *Server) handleInstallationCreate(w http.ResponseWriter, r *http.Request
 	}
 	sort.Strings(configKeys)
 	slog.Info("Installation request validated", "request_id", r.Header.Get("X-Request-ID"), "device_id", device.ID, "app_id", item.ID, "config_keys", configKeys, "mutation_id", mutationID)
+	if memberMarketCredentialChangeForbidden(r, item.ID, schemaDefaults(schema), request.Config) {
+		writeAPIError(w, 403, "owner_required", "Only the owner can change market credentials", nil)
+		return
+	}
 	config, fieldErrors := validateConfigPatch(schema, schemaDefaults(schema), request.Config)
 	for _, field := range schema.Fields {
 		if !field.Required {

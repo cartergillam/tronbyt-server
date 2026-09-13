@@ -35,7 +35,7 @@ func TestCanonicalWatchlistValidation(t *testing.T) {
 	body, _ = json.Marshal(five)
 	_, err = ParseMarketWatchlist(string(body))
 	require.NoError(t, err)
-	five = append(five, MarketListing{Symbol: "GOOG"})
+	five = append(five, MarketListing{Symbol: "GOOG"}, MarketListing{Symbol: "AMD"}, MarketListing{Symbol: "AMZN"}, MarketListing{Symbol: "META"}, MarketListing{Symbol: "INTC"}, MarketListing{Symbol: "IBM"})
 	body, _ = json.Marshal(five)
 	_, err = ParseMarketWatchlist(string(body))
 	require.Error(t, err)

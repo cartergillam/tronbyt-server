@@ -26,6 +26,10 @@ var (
 )
 
 type Metadata struct {
+	Label           string     `json:"label"`
+	UsedBy          []string   `json:"usedBy,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 	ID              string     `json:"id"`
 	Provider        string     `json:"provider"`
 	ScopeType       string     `json:"scopeType"`
@@ -80,13 +84,20 @@ func decodeMasterKey(value string) ([]byte, error) {
 	return nil, errors.New("PROVIDER_CREDENTIAL_MASTER_KEY must encode exactly 32 random bytes")
 }
 
-func (s *Store) Put(ctx context.Context, id, provider, scopeType, scopeID, secret string) (Metadata, error) {
+func (s *Store) Put(ctx context.Context, id, provider, scopeType, scopeID, secret string, labels ...string) (Metadata, error) {
 	if s == nil || s.aead == nil {
 		return Metadata{}, ErrMasterKeyUnavailable
 	}
 	// Provider API keys are opaque tokens. Trim paste-only whitespace before
 	// encrypting so a trailing newline cannot become part of an HTTP credential.
 	secret = strings.TrimSpace(secret)
+	label := ""
+	if len(labels) > 0 {
+		label = strings.TrimSpace(labels[0])
+		if len(label) > 128 || strings.ContainsAny(label, "\n\r\x00") {
+			return Metadata{}, errors.New("invalid credential label")
+		}
+	}
 	if strings.TrimSpace(id) == "" || strings.TrimSpace(provider) == "" || strings.TrimSpace(scopeType) == "" || strings.TrimSpace(scopeID) == "" || secret == "" {
 		return Metadata{}, errors.New("credential ID, provider, scope and secret are required")
 	}
@@ -108,6 +119,12 @@ func (s *Store) Put(ctx context.Context, id, provider, scopeType, scopeID, secre
 	aad := credentialAAD(id, provider, scopeType, scopeID, version)
 	ciphertext := s.aead.Seal(nil, nonce, []byte(secret), aad)
 	record := existing
+	if label != "" {
+		record.Label = label
+	}
+	if record.Label == "" {
+		record.Label = id
+	}
 	record.ID, record.Provider, record.ScopeType, record.ScopeID = id, provider, scopeType, scopeID
 	record.Ciphertext, record.Nonce, record.KeyVersion = ciphertext, nonce, version
 	record.ValidationState, record.ValidatedAt = "unvalidated", nil
@@ -209,7 +226,7 @@ func (s *Store) Delete(ctx context.Context, id, scopeType, scopeID string) error
 
 func metadata(record data.ProviderCredential) Metadata {
 	return Metadata{
-		ID: record.ID, Provider: record.Provider, ScopeType: record.ScopeType, ScopeID: record.ScopeID,
+		Label: record.Label, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ID: record.ID, Provider: record.Provider, ScopeType: record.ScopeType, ScopeID: record.ScopeID,
 		KeyVersion: record.KeyVersion, ValidationState: record.ValidationState,
 		ValidatedAt: record.ValidatedAt, LastUsedAt: record.LastUsedAt,
 		DisabledAt: record.DisabledAt, Enabled: record.DisabledAt == nil,
@@ -218,4 +235,28 @@ func metadata(record data.ProviderCredential) Metadata {
 
 func credentialAAD(id, provider, scopeType, scopeID string, version uint) []byte {
 	return []byte(fmt.Sprintf("tronbyt-provider-credential/v1\x00%s\x00%s\x00%s\x00%s\x00%d", id, provider, scopeType, scopeID, version))
+}
+
+func (s *Store) SetLabel(ctx context.Context, id, scopeType, scopeID, label string) error {
+	label = strings.TrimSpace(label)
+	if label == "" || len(label) > 128 || strings.ContainsAny(label, "\n\r\x00") {
+		return errors.New("invalid credential label")
+	}
+	return s.db.WithContext(ctx).Model(&data.ProviderCredential{}).Where("id = ? AND scope_type = ? AND scope_id = ?", id, scopeType, scopeID).Update("label", label).Error
+}
+
+// Cache scopes change on secret replacement, and disabled keys cannot serve
+// previously cached quotes. No plaintext secret enters the cache identity.
+func (s *Store) CredentialCacheScope(ctx context.Context, id, scopeType, scopeID string) (string, error) {
+	m, err := s.Metadata(ctx, id, scopeType, scopeID)
+	if err != nil {
+		return "", err
+	}
+	if !m.Enabled {
+		return "", ErrCredentialDisabled
+	}
+	if m.Provider != "twelve-data" && m.Provider != "twelvedata" && m.Provider != "market" {
+		return "", ErrScopeMismatch
+	}
+	return scopeType + ":" + scopeID + ":" + id + ":" + fmt.Sprint(m.KeyVersion), nil
 }

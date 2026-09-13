@@ -217,6 +217,7 @@ func (s *Server) handlePutProviderCredential(w http.ResponseWriter, r *http.Requ
 	}
 	var request struct {
 		Provider  string `json:"provider"`
+		Label     string `json:"label"`
 		ScopeType string `json:"scopeType"`
 		ScopeID   string `json:"scopeID"`
 		Secret    string `json:"secret"`
@@ -232,7 +233,7 @@ func (s *Server) handlePutProviderCredential(w http.ResponseWriter, r *http.Requ
 		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_credential_scope", "The provider or credential scope is invalid", nil)
 		return
 	}
-	metadata, err := s.CredentialStore.Put(r.Context(), r.PathValue("credentialID"), request.Provider, request.ScopeType, request.ScopeID, request.Secret)
+	metadata, err := s.CredentialStore.Put(r.Context(), r.PathValue("credentialID"), request.Provider, request.ScopeType, request.ScopeID, request.Secret, request.Label)
 	if err != nil {
 		writeAPIError(w, http.StatusUnprocessableEntity, "credential_store_failed", "The provider credential could not be stored", nil)
 		return
@@ -278,6 +279,16 @@ func (s *Server) handleListProviderCredentials(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "credentials_unavailable", "Provider credentials could not be loaded", nil)
 		return
+	}
+	for i := range items {
+		var devices []data.Device
+		if err := s.DB.WithContext(r.Context()).Where("username = ? AND market_credential_id = ?", owner.Username, items[i].ID).Order("id").Find(&devices).Error; err != nil {
+			writeAPIError(w, 500, "credentials_unavailable", "Credential assignments could not be loaded", nil)
+			return
+		}
+		for _, device := range devices {
+			items[i].UsedBy = append(items[i].UsedBy, device.ID)
+		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")

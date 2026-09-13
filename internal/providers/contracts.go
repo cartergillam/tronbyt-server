@@ -21,6 +21,7 @@ const (
 
 type MarketQuote struct {
 	ListingID        string       `json:"listingID,omitempty"`
+	LogoVersion      string       `json:"logoVersion,omitempty"`
 	LogoData         string       `json:"logoData,omitempty"`
 	ErrorCode        string       `json:"errorCode,omitempty"`
 	EOD              bool         `json:"eod,omitempty"`
@@ -67,7 +68,7 @@ func (request MarketRequest) Validate() error {
 		return err
 	}
 	if len(request.Symbols) == 0 || len(request.Symbols) > MaxMarketSymbols {
-		return SanitizedError{Code: "market_symbol_limit", Message: "Choose between 1 and 5 market symbols", Retryable: false}
+		return SanitizedError{Code: "market_symbol_limit", Message: "Choose between 1 and 10 market symbols", Retryable: false}
 	}
 	seen := map[string]bool{}
 	for _, symbol := range request.Symbols {
@@ -81,9 +82,9 @@ func (request MarketRequest) Validate() error {
 	return nil
 }
 
-// MaxMarketSymbols keeps the default five-minute open-market refresh within a
-// Twelve Data Basic-plan daily credit budget for a personal display.
-const MaxMarketSymbols = 5
+// MaxMarketSymbols is the display cap; per-listing cadence and credit
+// reservations independently protect the Twelve Data Basic budget.
+const MaxMarketSymbols = 10
 
 type MarketProvider interface {
 	Quotes(context.Context, MarketRequest) ([]MarketQuote, error)

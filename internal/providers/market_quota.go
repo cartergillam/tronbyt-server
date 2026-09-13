@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -143,7 +144,10 @@ func (a *TwelveDataAdapter) listingQuotes(ctx context.Context, r MarketRequest) 
 	// refreshing the same expired listing. No render mode/device ID enters keys.
 	a.quoteMu.Lock()
 	defer a.quoteMu.Unlock()
-	scope := r.ScopeType + ":" + r.ScopeID + ":" + r.CredentialID
+	scope, scopeErr := a.credentialCacheScope(ctx, r.CredentialID, r.ScopeType, r.ScopeID)
+	if scopeErr != nil {
+		return nil, MissingCredential("Market data")
+	}
 	inputs := []quoteInput{}
 	if r.Listings != nil {
 		raw, _ := json.Marshal(r.Listings)
@@ -197,6 +201,19 @@ func (a *TwelveDataAdapter) listingQuotes(ctx context.Context, r MarketRequest) 
 		a.diagnostics.CacheMisses++
 		a.usageMu.Unlock()
 	}
+	// A Basic key cannot pay for ten simultaneous symbols. Five-symbol groups
+	// leave minute headroom and defer the second group until capacity resets.
+	splitGroups := map[string][]int{}
+	splitOrder := []string{}
+	for _, key := range groupOrder {
+		indices := groups[key]
+		for start := 0; start < len(indices); start += 5 {
+			name := key + "#" + strconv.Itoa(start)
+			splitOrder = append(splitOrder, name)
+			splitGroups[name] = indices[start:min(start+5, len(indices))]
+		}
+	}
+	groups, groupOrder = splitGroups, splitOrder
 	fetched := map[string]MarketQuote{}
 	failures := map[string]error{}
 	for _, group := range groupOrder {
@@ -271,7 +288,13 @@ func (a *TwelveDataAdapter) listingQuotes(ctx context.Context, r MarketRequest) 
 	for _, in := range inputs {
 		quotes, stale, err := a.Cache.GetWithTTL(ctx, in.key, marketStaleTTL, func(context.Context) ([]MarketQuote, time.Duration, error) {
 			if q, ok := fetched[in.key]; ok {
-				return []MarketQuote{q}, marketQuoteTTL(q, time.Now()), nil
+				ttl := marketQuoteTTL(q, time.Now())
+				// For >8 active listings, a modest freshness relaxation avoids
+				// spending 780 credits just on an ordinary trading session.
+				if len(inputs) > 8 && q.MarketStatus == MarketOpen {
+					ttl = max(ttl, 6*time.Minute)
+				}
+				return []MarketQuote{q}, ttl, nil
 			}
 			if err := failures[in.key]; err != nil {
 				return nil, 0, err
@@ -316,11 +339,61 @@ func (a *TwelveDataAdapter) listingQuotes(ctx context.Context, r MarketRequest) 
 	return result, nil
 }
 
+// Stores may version cache scopes without decrypting the credential. Test and
+// legacy resolvers retain their existing owner + credential identity.
+func (a *TwelveDataAdapter) credentialCacheScope(ctx context.Context, id, scopeType, scopeID string) (string, error) {
+	if resolver, ok := a.Credentials.(interface {
+		CredentialCacheScope(context.Context, string, string, string) (string, error)
+	}); ok {
+		return resolver.CredentialCacheScope(ctx, id, scopeType, scopeID)
+	}
+	return scopeType + ":" + scopeID + ":" + id, nil
+}
+
+// CachedQuoteRevision fingerprints display data without permitting a provider
+// call. Render output may expire independently of quote/provider caches.
+func (a *TwelveDataAdapter) CachedQuoteRevision(ctx context.Context, r MarketRequest) string {
+	scope, err := a.credentialCacheScope(ctx, r.CredentialID, r.ScopeType, r.ScopeID)
+	if err != nil {
+		return "unconfigured"
+	}
+	keys := []string{}
+	if r.Listings != nil {
+		for _, listing := range r.Listings {
+			l, err := listing.Normalize()
+			if err != nil {
+				return "invalid"
+			}
+			keys = append(keys, scope+":"+l.ID+":"+l.Currency)
+		}
+	} else {
+		for _, raw := range r.Symbols {
+			symbol, err := NormalizeMarketSymbol(raw)
+			if err != nil {
+				return "invalid"
+			}
+			keys = append(keys, scope+":"+symbol)
+		}
+	}
+	quotes := []MarketQuote{}
+	a.Cache.mu.Lock()
+	for _, key := range keys {
+		if entry, ok := a.Cache.entries[key]; ok && len(entry.value) > 0 {
+			quote := entry.value[0]
+			quote.Stale = time.Now().After(entry.freshUntil)
+			quotes = append(quotes, quote)
+		}
+	}
+	a.Cache.mu.Unlock()
+	data, _ := json.Marshal(quotes)
+	return strconv.FormatUint(uint64(len(quotes)), 10) + ":" + fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
 func marketQuoteTTL(q MarketQuote, now time.Time) time.Duration {
 	ttl := quoteFreshTTL([]MarketQuote{q})
 	// Small weekday/session bound for known North American venues. This is not
 	// a holiday calendar: opening time merely allows a refresh to discover state.
-	if q.MIC != "XNAS" && q.MIC != "XNYS" && q.MIC != "ARCX" && q.MIC != "XTSE" {
+	if q.MIC != "XNAS" && q.MIC != "XNGS" && q.MIC != "XNMS" && q.MIC != "XNCM" && q.MIC != "XNYS" && q.MIC != "ARCX" && q.MIC != "XTSE" {
 		return ttl
 	}
 	loc, err := time.LoadLocation("America/New_York")

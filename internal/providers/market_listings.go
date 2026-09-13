@@ -79,7 +79,7 @@ func ParseMarketWatchlist(raw string) ([]MarketListing, error) {
 		return nil, errors.New("watchlist must contain listings")
 	}
 	if len(listings) < 1 || len(listings) > MaxMarketSymbols {
-		return nil, errors.New("choose between 1 and 5 stocks")
+		return nil, errors.New("choose between 1 and 10 stocks")
 	}
 	seen := map[string]bool{}
 	for i, listing := range listings {
@@ -109,7 +109,10 @@ func (adapter *TwelveDataAdapter) Search(ctx context.Context, request MarketSear
 	if len([]rune(query)) < 2 || len(query) > 80 || strings.ContainsFunc(query, unicode.IsControl) {
 		return nil, SanitizedError{Code: "invalid_search", Message: "Enter between 2 and 80 characters", Retryable: false}
 	}
-	key := request.ScopeType + ":" + request.ScopeID + ":" + request.CredentialID
+	key, scopeErr := adapter.credentialCacheScope(ctx, request.CredentialID, request.ScopeType, request.ScopeID)
+	if scopeErr != nil {
+		return nil, MissingCredential("Market data")
+	}
 	result, _, err := adapter.SearchCache.Get(ctx, key+":"+strings.ToUpper(query), marketSearchTTL, 7*24*time.Hour, func(ctx context.Context) ([]MarketListing, error) {
 		if adapter.rateLimited(key) {
 			return nil, marketQuotaError()

@@ -2,6 +2,7 @@ package providers
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"image"
@@ -101,7 +102,7 @@ func TestMarketQuotaOpenClosedAndUnknownFreshness(t *testing.T) {
 		}
 		require.EqualValues(t, 1, calls.Load())
 	}
-	require.Equal(t, 3*time.Minute, marketOpenFreshTTL)
+	require.Equal(t, 5*time.Minute, marketOpenFreshTTL)
 	require.Equal(t, time.Hour, marketClosedFreshTTL)
 	require.Equal(t, time.Hour, marketQuoteTTL(MarketQuote{MarketStatus: MarketUnknown}, time.Now()))
 }
@@ -182,8 +183,9 @@ func TestMarketQuotaCreditHeadersSafeAndLocalDailyBound(t *testing.T) {
 	u.Remaining = 8
 	a.usage[k] = u
 	require.False(t, a.reserveCredits("secret", 5, true))
-	// 390 session minutes / 3-minute freshness = 130 cycles, 650 symbol credits.
-	require.Equal(t, 650, 5*int((390*time.Minute)/marketOpenFreshTTL))
+	// Ten symbols at five minutes is 780 credits, so congested watchlists use six minutes (~650).
+	require.Equal(t, 780, 10*int((390*time.Minute)/marketOpenFreshTTL))
+	require.Equal(t, 650, 10*int((390*time.Minute)/(6*time.Minute)))
 	require.Less(t, 650, 800)
 }
 func TestMarketQuotaClosingSnapshotReusedThroughWeekend(t *testing.T) {
@@ -195,6 +197,10 @@ func TestMarketQuotaClosingSnapshotReusedThroughWeekend(t *testing.T) {
 	require.Equal(t, time.Date(2026, 9, 14, 9, 30, 0, 0, loc).Sub(now), marketQuoteTTL(q, now))
 	saturday := time.Date(2026, 9, 12, 12, 0, 0, 0, loc)
 	require.Equal(t, time.Date(2026, 9, 14, 9, 30, 0, 0, loc).Sub(saturday), marketQuoteTTL(q, saturday))
+	for _, mic := range []string{"XNGS", "XNMS", "XNCM", "XTSE"} {
+		q.MIC = mic
+		require.Equal(t, time.Date(2026, 9, 14, 9, 30, 0, 0, loc).Sub(saturday), marketQuoteTTL(q, saturday))
+	}
 	q.QuoteTimestamp = closing.AddDate(0, 0, -1)
 	require.Equal(t, time.Hour, marketQuoteTTL(q, saturday))
 }
@@ -291,7 +297,7 @@ func TestMarketQuotaFiveCanonicalListingsUseOneBatch(t *testing.T) {
 	require.EqualValues(t, 5, a.Diagnostics().EstimatedQuoteCredits)
 }
 
-func TestMarketQuotaNoRefreshBeforeThreeMinutes(t *testing.T) {
+func TestMarketQuotaNoRefreshBeforeFiveMinutes(t *testing.T) {
 	a, calls := quotaAdapter(t, true)
 	r := quotaRequest("AAPL")
 	_, err := a.Quotes(t.Context(), r)
@@ -299,7 +305,7 @@ func TestMarketQuotaNoRefreshBeforeThreeMinutes(t *testing.T) {
 	k := "server_owner:owner:primary:AAPL"
 	a.Cache.mu.Lock()
 	e := a.Cache.entries[k]
-	// Simulate 2:59 elapsed, leaving one second of the actual three-minute policy.
+	// Simulate 4:59 elapsed, leaving one second of the actual five-minute policy.
 	e.freshUntil = e.freshUntil.Add(-179 * time.Second)
 	a.Cache.entries[k] = e
 	a.Cache.lastRun[k] = time.Now().Add(-179 * time.Second)
@@ -344,4 +350,205 @@ func TestMarketRemoteLogoCacheIndependentOfQuoteRefresh(t *testing.T) {
 	require.Equal(t, 2, quotes)
 	require.Equal(t, 1, metadata)
 	require.Equal(t, 1, images)
+}
+
+func TestMarketTenSymbolsStaggeredFiveCreditGroups(t *testing.T) {
+	a, calls := quotaAdapter(t, true)
+	r := quotaRequest("AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "AMD", "INTC", "IBM", "ORCL")
+	q, err := a.Quotes(t.Context(), r)
+	require.NoError(t, err)
+	require.Len(t, q, 10)
+	require.EqualValues(t, 1, calls.Load())
+	require.EqualValues(t, 5, a.Diagnostics().EstimatedQuoteCredits)
+	for i := 0; i < 5; i++ {
+		require.Empty(t, q[i].ErrorCode)
+	}
+	for i := 5; i < 10; i++ {
+		require.Equal(t, "provider_rate_limited", q[i].ErrorCode)
+	}
+	for range 10 {
+		_, err = a.Quotes(t.Context(), r)
+		require.NoError(t, err)
+	}
+	require.EqualValues(t, 1, calls.Load())
+	a.usageMu.Lock()
+	k := sha256.Sum256([]byte("secret"))
+	u := a.usage[k]
+	u.MinuteUntil = time.Now().Add(-time.Second)
+	u.Reservations = nil
+	a.usage[k] = u
+	a.usageMu.Unlock()
+	a.failureMu.Lock()
+	for k, v := range a.failures {
+		v.until = time.Now().Add(-time.Second)
+		a.failures[k] = v
+	}
+	a.failureMu.Unlock()
+	q, err = a.Quotes(t.Context(), r)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, calls.Load())
+	for _, quote := range q {
+		require.Empty(t, quote.ErrorCode)
+	}
+	require.EqualValues(t, 10, a.Diagnostics().EstimatedQuoteCredits)
+	for _, e := range a.Cache.entries {
+		require.WithinDuration(t, time.Now().Add(6*time.Minute), e.freshUntil, time.Second)
+	}
+}
+
+type householdMarketResolver struct{}
+
+func (householdMarketResolver) Resolve(_ context.Context, id, _, _ string) (string, error) {
+	return "offline-" + id, nil
+}
+func TestMarketHouseholdKeysIsolateRateLimitAndInvalidKey(t *testing.T) {
+	for _, code := range []int{401, 429} {
+		var callsA, callsB int
+		a := NewTwelveDataAdapter(householdMarketResolver{}, &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Header.Get("Authorization") == "apikey offline-a" {
+				callsA++
+				return jsonResponse(200, map[string]any{"status": "error", "code": code}), nil
+			}
+			callsB++
+			return jsonResponse(200, quotaFixture("AAPL", true)), nil
+		})})
+		ra := quotaRequest("AAPL")
+		ra.CredentialID = "a"
+		rb := ra
+		rb.CredentialID = "b"
+		_, err := a.Quotes(t.Context(), ra)
+		require.Error(t, err)
+		q, err := a.Quotes(t.Context(), rb)
+		require.NoError(t, err)
+		require.Empty(t, q[0].ErrorCode)
+		for range 10 {
+			_, err = a.Quotes(t.Context(), ra)
+			require.Error(t, err)
+			_, err = a.Quotes(t.Context(), rb)
+			require.NoError(t, err)
+		}
+		require.Equal(t, 1, callsA)
+		require.Equal(t, 1, callsB)
+		require.Len(t, a.usage, 2)
+	}
+}
+func TestMarketPlazaAndDottedSymbolsPreserveListingAndClassifyEntitlement(t *testing.T) {
+	for _, symbol := range []string{"PLZ.UN", "BAM.A", "BRK.B"} {
+		s, err := NormalizeMarketSymbol(strings.ToLower(symbol) + ":TSX")
+		require.NoError(t, err)
+		require.Equal(t, symbol+":TSX", s)
+	}
+	for _, mode := range []string{"good", "plan400", "plan401", "invalid"} {
+		a := NewTwelveDataAdapter(fakeResolver{secret: "secret"}, &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			require.Equal(t, "PLZ.UN", r.URL.Query().Get("symbol"))
+			require.Equal(t, "XTSE", r.URL.Query().Get("mic_code"))
+			if mode == "plan400" {
+				return jsonResponse(200, map[string]any{"code": 400, "status": "error", "message": "Symbol is not available on your current plan. Upgrade subscription."}), nil
+			}
+			if mode == "plan401" {
+				return jsonResponse(200, map[string]any{"code": 401, "status": "error", "message": "Canadian market access requires an upgraded plan"}), nil
+			}
+			if mode == "invalid" {
+				return jsonResponse(200, map[string]any{"code": 404, "status": "error", "message": "Invalid symbol"}), nil
+			}
+			q := quotaFixture("PLZ.UN", true)
+			q["exchange"] = "TSX"
+			q["mic_code"] = "XTSE"
+			q["currency"] = "CAD"
+			return jsonResponse(200, q), nil
+		})})
+		r := quotaRequest()
+		r.Listings = []MarketListing{{Symbol: "PLZ.UN", Exchange: "TSX", MIC: "XTSE", Currency: "CAD", RequiredPlan: "Grow"}}
+		q, err := a.Quotes(t.Context(), r)
+		require.NoError(t, err)
+		require.Equal(t, "PLZ.UN", q[0].Symbol)
+		if strings.HasPrefix(mode, "plan") {
+			require.Equal(t, "provider_entitlement_required", q[0].ErrorCode)
+		} else if mode == "invalid" {
+			require.Equal(t, "invalid_symbol", q[0].ErrorCode)
+		} else {
+			require.Empty(t, q[0].ErrorCode)
+		}
+	}
+}
+func TestMarketCuratedLogosWinOverOldRemoteCache(t *testing.T) {
+	a, calls := quotaAdapter(t, true)
+	for _, symbol := range []string{"AAPL", "MSFT"} {
+		oldKey := "server_owner:owner:primary:twelvedata:" + symbol + ":XNAS"
+		_, _, err := a.LogoCache.Get(t.Context(), oldKey, 24*time.Hour, 0, func(context.Context) (string, error) { return "old-bad-square", nil })
+		require.NoError(t, err)
+		q := a.HydrateQuotes(t.Context(), quotaRequest(symbol), []MarketQuote{{Symbol: symbol, MIC: "XNAS", Currency: "USD"}})
+		require.NotEqual(t, "old-bad-square", q[0].LogoData)
+		require.Equal(t, MarketLogoRevision(), q[0].LogoVersion)
+		q2 := a.HydrateQuotes(t.Context(), quotaRequest(symbol), []MarketQuote{{Symbol: symbol, MIC: "XNGS", Currency: "USD"}})
+		require.Equal(t, q[0].LogoData, q2[0].LogoData)
+	}
+	require.Zero(t, calls.Load())
+}
+
+func TestMarketLogoFingerprintAndCachedQuoteRevisionIndependentOfProvider(t *testing.T) {
+	require.NotEqual(t, marketLogoFingerprint("v1", []byte("asset-a")), marketLogoFingerprint("v2", []byte("asset-a")))
+	require.NotEqual(t, marketLogoFingerprint("v1", []byte("asset-a")), marketLogoFingerprint("v1", []byte("asset-b")))
+	a, calls := quotaAdapter(t, true)
+	r := quotaRequest("AAPL")
+	q, err := a.Quotes(t.Context(), r)
+	require.NoError(t, err)
+	revision := a.CachedQuoteRevision(t.Context(), r)
+	hydrated := a.HydrateQuotes(t.Context(), r, q)
+	require.NotEmpty(t, hydrated[0].LogoVersion)
+	require.Equal(t, revision, a.CachedQuoteRevision(t.Context(), r))
+	require.EqualValues(t, 1, calls.Load())
+	a.Cache.mu.Lock()
+	key := "server_owner:owner:primary:AAPL"
+	entry := a.Cache.entries[key]
+	entry.value = append([]MarketQuote(nil), entry.value...)
+	entry.value[0].Price++
+	a.Cache.entries[key] = entry
+	a.Cache.mu.Unlock()
+	require.NotEqual(t, revision, a.CachedQuoteRevision(t.Context(), r))
+	require.EqualValues(t, 1, calls.Load())
+}
+
+func TestMarketTwoTenStockDevicesHaveIndependentBudgets(t *testing.T) {
+	counts := map[string]int{}
+	a := NewTwelveDataAdapter(householdMarketResolver{}, &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		counts[r.Header.Get("Authorization")]++
+		batch := map[string]any{}
+		for _, s := range strings.Split(r.URL.Query().Get("symbol"), ",") {
+			batch[s] = quotaFixture(s, true)
+		}
+		return jsonResponse(200, batch), nil
+	})})
+	r := quotaRequest("AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "AMD", "INTC", "IBM", "ORCL")
+	for _, id := range []string{"a", "b"} {
+		r.CredentialID = id
+		q, err := a.Quotes(t.Context(), r)
+		require.NoError(t, err)
+		require.Len(t, q, 10)
+		require.Equal(t, 1, counts["apikey offline-"+id])
+	}
+	require.EqualValues(t, 10, a.Diagnostics().EstimatedQuoteCredits)
+	a.usageMu.Lock()
+	for k, u := range a.usage {
+		u.Reservations = nil
+		u.MinuteUntil = time.Now().Add(-time.Second)
+		a.usage[k] = u
+	}
+	a.usageMu.Unlock()
+	a.failureMu.Lock()
+	for k, f := range a.failures {
+		f.until = time.Now().Add(-time.Second)
+		a.failures[k] = f
+	}
+	a.failureMu.Unlock()
+	for _, id := range []string{"a", "b"} {
+		r.CredentialID = id
+		q, err := a.Quotes(t.Context(), r)
+		require.NoError(t, err)
+		for _, v := range q {
+			require.Empty(t, v.ErrorCode)
+		}
+		require.Equal(t, 2, counts["apikey offline-"+id])
+	}
+	require.EqualValues(t, 20, a.Diagnostics().EstimatedQuoteCredits)
 }

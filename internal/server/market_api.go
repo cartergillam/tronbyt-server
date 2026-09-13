@@ -16,13 +16,15 @@ func (s *Server) handleMarketSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	credential := strings.TrimSpace(r.URL.Query().Get("credentialID"))
-	if credential == "" {
-		credential = "market-primary"
+	if principalKindFromContext(r.Context()) == apiPrincipalMember {
+		credential = "" // Members cannot select arbitrary owner credentials.
 	}
-	if len(credential) > 128 {
-		writeAPIError(w, 400, "invalid_search", "Invalid credential reference", nil)
+	resolved, err := s.marketCredential(r.Context(), GetDevice(r), credential)
+	if err != nil {
+		writeAPIError(w, 422, "provider_credential_missing", "Market data is not configured", nil)
 		return
 	}
+	credential = resolved
 	items, err := searcher.Search(r.Context(), providers.MarketSearchRequest{Query: r.URL.Query().Get("q"), CredentialID: credential, ScopeType: "server_owner", ScopeID: GetDevice(r).Username})
 	if err != nil {
 		var classified providers.SanitizedError

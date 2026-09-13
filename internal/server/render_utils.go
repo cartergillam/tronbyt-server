@@ -27,6 +27,12 @@ import (
 // RenderApp consolidates the logic for rendering an app for a device.
 // It handles config overrides, timezone/locale injection, dwell time, and filters.
 func (s *Server) RenderApp(ctx context.Context, device *data.Device, app *data.App, appPath string, configOverrides map[string]any) ([]byte, []string, error) {
+	if app != nil && principalKindFromContext(ctx) == apiPrincipalMember && configOverrides != nil {
+		r := (&http.Request{}).WithContext(ctx)
+		if memberMarketCredentialChangeForbidden(r, app.Name, app.Config, configOverrides) {
+			return nil, nil, providers.SanitizedError{Code: "owner_required", Message: "Only the owner can change market credentials"}
+		}
+	}
 	// Config
 	var config map[string]any
 	switch {
@@ -65,7 +71,11 @@ func (s *Server) RenderApp(ctx context.Context, device *data.Device, app *data.A
 	// is short. This affects only Market Watch; the device animation flag remains
 	// the existing app-level setting.
 	if app != nil && app.Name == "market-watch" && config["display_mode"] == "ticker" {
-		appInterval = max(appInterval, 30)
+		appInterval = max(appInterval, 60)
+	}
+	if app != nil && app.Name == "market-watch" && config["display_mode"] != "ticker" {
+		duration, _ := strconv.Atoi(fmt.Sprint(config["symbol_duration"]))
+		appInterval = max(appInterval, 10*max(3, min(8, duration)))
 	}
 
 	// Filters
@@ -120,10 +130,12 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 	}
 	switch app.Name {
 	case "market-watch":
-		if credentialID == "" {
-			setError(providers.MissingCredential("Market data"))
+		resolved, err := s.marketCredential(ctx, device, credentialID)
+		if err != nil {
+			setError(err)
 			return
 		}
+		credentialID = resolved
 		if s.MarketProvider == nil {
 			setError(providers.ProviderSetupRequired("Market data"))
 			return
@@ -133,7 +145,7 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 		if raw, ok := config["watchlist"].(string); ok && strings.TrimSpace(raw) != "" {
 			listings, err := providers.ParseMarketWatchlist(raw)
 			if err != nil {
-				setError(providers.SanitizedError{Code: "invalid_symbol", Message: "Choose between 1 and 5 distinct listings"})
+				setError(providers.SanitizedError{Code: "invalid_symbol", Message: "Choose between 1 and 10 distinct listings"})
 				return
 			}
 			request.Listings = listings
@@ -448,7 +460,7 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 
 	// 3. Starlark App - Check interval or an app-provided eligibility boundary.
 	now := time.Now()
-	contextHash := renderContextHash(device, app)
+	contextHash := s.marketRenderContextHash(ctx, device, app)
 	contextChanged := app.RenderContextHash != contextHash
 	shouldRender := contextChanged || renderDue(now, app)
 	cacheDecision := "hit"
@@ -474,6 +486,9 @@ func (s *Server) possiblyRender(ctx context.Context, app *data.App, device *data
 
 		startTime := time.Now()
 		imgBytes, messages, err := s.RenderApp(ctx, device, app, appPath, nil)
+		if app.Name == "market-watch" {
+			contextHash = s.marketRenderContextHash(ctx, device, app)
+		}
 		renderDur := time.Since(startTime)
 
 		for _, msg := range messages {
@@ -616,6 +631,33 @@ func renderContextHash(device *data.Device, app *data.App) string {
 	return renderContextHashAt(time.Now(), device, app)
 }
 
+func (s *Server) marketRenderContextHash(ctx context.Context, device *data.Device, app *data.App) string {
+	base := renderContextHash(device, app)
+	if app.Name != "market-watch" {
+		return base
+	}
+	provider, ok := s.MarketProvider.(interface {
+		CachedQuoteRevision(context.Context, providers.MarketRequest) string
+	})
+	if !ok {
+		return base
+	}
+	explicit, _ := app.Config["credential_id"].(string)
+	id, err := s.marketCredential(ctx, device, explicit)
+	if err != nil {
+		return base + ":unconfigured"
+	}
+	request := providers.MarketRequest{Symbols: providerSymbols(app.Config["symbols"]), CredentialID: id, ScopeType: "server_owner", ScopeID: device.Username}
+	if raw, ok := app.Config["watchlist"].(string); ok && strings.TrimSpace(raw) != "" {
+		request.Listings, err = providers.ParseMarketWatchlist(raw)
+		if err != nil {
+			return base + ":invalid"
+		}
+	}
+	sum := sha256.Sum256([]byte(base + ":" + provider.CachedQuoteRevision(ctx, request)))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
 func renderContextHashAt(now time.Time, device *data.Device, app *data.App) string {
 	context := map[string]any{
 		"deviceID":            device.ID,
@@ -630,6 +672,10 @@ func renderContextHashAt(now time.Time, device *data.Device, app *data.App) stri
 		"pinnedApp":           device.PinnedApp,
 		"activeShowNowApp":    device.ActiveShowNowApp,
 		"showNowRestoreApp":   device.ShowNowRestoreApp,
+	}
+	if app.Name == "market-watch" {
+		context["marketLogoRevision"] = providers.MarketLogoRevision()
+		context["marketCredentialAssignment"] = device.MarketCredentialID
 	}
 	if isClockInstallation(app) {
 		context["visibleLocalMinute"] = now.In(deviceLocation(device)).Format("2006-01-02T15:04")
