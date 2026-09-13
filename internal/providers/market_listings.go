@@ -110,11 +110,10 @@ func (adapter *TwelveDataAdapter) Search(ctx context.Context, request MarketSear
 		return nil, SanitizedError{Code: "invalid_search", Message: "Enter between 2 and 80 characters", Retryable: false}
 	}
 	key := request.ScopeType + ":" + request.ScopeID + ":" + request.CredentialID
-	// Bound credit spending across different search strings, not just repeats.
-	if adapter.rateLimited(key) {
-		return nil, SanitizedError{Code: "provider_rate_limited", Message: "Market search is temporarily rate limited", Retryable: true}
-	}
-	result, _, err := adapter.SearchCache.Get(ctx, key+":"+strings.ToUpper(query), 15*time.Minute, 0, func(ctx context.Context) ([]MarketListing, error) {
+	result, _, err := adapter.SearchCache.Get(ctx, key+":"+strings.ToUpper(query), marketSearchTTL, 7*24*time.Hour, func(ctx context.Context) ([]MarketListing, error) {
+		if adapter.rateLimited(key) {
+			return nil, marketQuotaError()
+		}
 		adapter.searchMu.Lock()
 		last := adapter.searchLast[key]
 		if time.Since(last) < time.Second {

@@ -1,10 +1,15 @@
 package providers
 
 import (
+	"bytes"
 	"context"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"image"
+	"image/draw"
+	"image/png"
 	"io"
 	"net/http"
 	"net/url"
@@ -12,6 +17,40 @@ import (
 	"sync"
 	"time"
 )
+
+//go:embed market_logo_overrides/*.svg
+var marketLogoOverrides embed.FS
+
+var approvedMarketLogos = map[string]string{
+	"twelvedata:AAPL:XNAS": "apple.svg",
+	"twelvedata:MSFT:XNAS": "microsoft.svg",
+}
+
+func bundledMarketLogo(listing MarketListing) string {
+	name := approvedMarketLogos[listing.ID]
+	if name == "" || listing.Currency != "USD" {
+		return ""
+	}
+	body, err := marketLogoOverrides.ReadFile("market_logo_overrides/" + name)
+	if err != nil {
+		return ""
+	}
+	normalized, err := normalizeLogoAtSize(body, "image/svg+xml", 18)
+	if err != nil {
+		return ""
+	}
+	source, _, err := image.Decode(bytes.NewReader(normalized))
+	if err != nil {
+		return ""
+	}
+	canvas := image.NewRGBA(image.Rect(0, 0, 20, 20))
+	draw.Draw(canvas, image.Rect(1, 1, 19, 19), source, image.Point{}, draw.Src)
+	var encoded bytes.Buffer
+	if png.Encode(&encoded, canvas) != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(encoded.Bytes())
+}
 
 // marketJSON is only used with adapter-owned endpoint paths. The provider
 // secret never accompanies image requests or leaves the server contract.
@@ -25,10 +64,14 @@ func (adapter *TwelveDataAdapter) marketJSON(ctx context.Context, path string, q
 		return MissingCredential("Market data")
 	}
 	req.Header.Set("Authorization", "apikey "+strings.TrimSpace(secret))
+	if !adapter.reserveCredits(secret, 1, false) {
+		return marketQuotaError()
+	}
 	response, err := adapter.Client.Do(req)
 	if err != nil {
 		return TemporarilyUnavailable()
 	}
+	adapter.observeCredits(secret, response.Header)
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 512*1024+1))
 	if err != nil || len(body) > 512*1024 {
@@ -70,6 +113,9 @@ func (adapter *TwelveDataAdapter) HydrateQuotes(ctx context.Context, request Mar
 			defer group.Done()
 			key := request.ScopeType + ":" + request.ScopeID + ":" + request.CredentialID + ":" + listing.ID
 			logo, _, _ := adapter.LogoCache.GetWithTTL(ctx, key, 30*24*time.Hour, func(ctx context.Context) (string, time.Duration, error) {
+				if logo := bundledMarketLogo(listing); logo != "" {
+					return logo, 365 * 24 * time.Hour, nil
+				}
 				secret, err := adapter.Credentials.Resolve(ctx, request.CredentialID, request.ScopeType, request.ScopeID)
 				if err != nil {
 					return "", 0, err
@@ -87,8 +133,8 @@ func (adapter *TwelveDataAdapter) HydrateQuotes(ctx context.Context, request Mar
 				if !allowedMarketLogoURL(payload.URL) {
 					return "", 24 * time.Hour, nil
 				}
-				data, _, err := adapter.LogoImages.cache.Get(ctx, payload.URL, 7*24*time.Hour, 30*24*time.Hour, func(ctx context.Context) (string, error) { return adapter.LogoImages.fetch(ctx, payload.URL) })
-				return data, 7 * 24 * time.Hour, err
+				data, _, err := adapter.LogoImages.cache.Get(ctx, payload.URL, 30*24*time.Hour, 90*24*time.Hour, func(ctx context.Context) (string, error) { return adapter.LogoImages.fetch(ctx, payload.URL) })
+				return data, 30 * 24 * time.Hour, err
 			})
 			result[index].LogoData = logo
 		}(index, listing)

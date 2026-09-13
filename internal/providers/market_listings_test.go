@@ -151,7 +151,7 @@ func TestMarketLogosAreOptionalCachedAndDoNotReceiveCredentials(t *testing.T) {
 				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"image/jpeg"}}, Body: io.NopCloser(bytes.NewReader(imageBytes)), Request: req}, nil
 			})})
 			req := MarketRequest{CredentialID: "primary", ScopeType: "server_owner", ScopeID: "owner"}
-			original := []MarketQuote{{Symbol: "AAPL", Price: 123, Exchange: "NASDAQ", MIC: "XNAS", Currency: "USD"}}
+			original := []MarketQuote{{Symbol: "NVDA", Price: 123, Exchange: "NASDAQ", MIC: "XNAS", Currency: "USD"}}
 			quotes := adapter.HydrateQuotes(t.Context(), req, original)
 			second := adapter.HydrateQuotes(t.Context(), req, original)
 			assert.Equal(t, 123.0, quotes[0].Price)

@@ -1,0 +1,1 @@
+Apple: canonical Apple silhouette from Simple Icons (https://github.com/simple-icons/simple-icons/blob/develop/icons/apple.svg), rendered white. Microsoft: canonical four brand-color tiles. Both are transparent vector assets, normalized through the existing logo pipeline. Overrides apply only to approved US listings; never strip colors from arbitrary company logos.
