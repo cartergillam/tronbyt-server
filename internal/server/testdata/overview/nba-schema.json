@@ -1,0 +1,190 @@
+{
+  "version": "1",
+  "schema": [
+    {
+      "type": "dropdown",
+      "id": "teamid",
+      "name": "Favorite Team",
+      "description": "Follow one team through its season, next game and last result.",
+      "icon": "star",
+      "default": "13",
+      "options": [
+        {
+          "display": "Atlanta Hawks",
+          "text": "Atlanta Hawks",
+          "value": "1"
+        },
+        {
+          "display": "Boston Celtics",
+          "text": "Boston Celtics",
+          "value": "2"
+        },
+        {
+          "display": "Brooklyn Nets",
+          "text": "Brooklyn Nets",
+          "value": "17"
+        },
+        {
+          "display": "Charlotte Hornets",
+          "text": "Charlotte Hornets",
+          "value": "30"
+        },
+        {
+          "display": "Chicago Bulls",
+          "text": "Chicago Bulls",
+          "value": "4"
+        },
+        {
+          "display": "Cleveland Cavaliers",
+          "text": "Cleveland Cavaliers",
+          "value": "5"
+        },
+        {
+          "display": "Dallas Mavericks",
+          "text": "Dallas Mavericks",
+          "value": "6"
+        },
+        {
+          "display": "Denver Nuggets",
+          "text": "Denver Nuggets",
+          "value": "7"
+        },
+        {
+          "display": "Detroit Pistons",
+          "text": "Detroit Pistons",
+          "value": "8"
+        },
+        {
+          "display": "Golden State Warriors",
+          "text": "Golden State Warriors",
+          "value": "9"
+        },
+        {
+          "display": "Houston Rockets",
+          "text": "Houston Rockets",
+          "value": "10"
+        },
+        {
+          "display": "Indiana Pacers",
+          "text": "Indiana Pacers",
+          "value": "11"
+        },
+        {
+          "display": "LA Clippers",
+          "text": "LA Clippers",
+          "value": "12"
+        },
+        {
+          "display": "Los Angeles Lakers",
+          "text": "Los Angeles Lakers",
+          "value": "13"
+        },
+        {
+          "display": "Memphis Grizzlies",
+          "text": "Memphis Grizzlies",
+          "value": "29"
+        },
+        {
+          "display": "Miami Heat",
+          "text": "Miami Heat",
+          "value": "14"
+        },
+        {
+          "display": "Milwaukee Bucks",
+          "text": "Milwaukee Bucks",
+          "value": "15"
+        },
+        {
+          "display": "Minnesota Timberwolves",
+          "text": "Minnesota Timberwolves",
+          "value": "16"
+        },
+        {
+          "display": "New Orleans Pelicans",
+          "text": "New Orleans Pelicans",
+          "value": "3"
+        },
+        {
+          "display": "New York Knicks",
+          "text": "New York Knicks",
+          "value": "18"
+        },
+        {
+          "display": "Oklahoma City Thunder",
+          "text": "Oklahoma City Thunder",
+          "value": "25"
+        },
+        {
+          "display": "Orlando Magic",
+          "text": "Orlando Magic",
+          "value": "19"
+        },
+        {
+          "display": "Philadelphia 76ers",
+          "text": "Philadelphia 76ers",
+          "value": "20"
+        },
+        {
+          "display": "Phoenix Suns",
+          "text": "Phoenix Suns",
+          "value": "21"
+        },
+        {
+          "display": "Portland Trail Blazers",
+          "text": "Portland Trail Blazers",
+          "value": "22"
+        },
+        {
+          "display": "Sacramento Kings",
+          "text": "Sacramento Kings",
+          "value": "23"
+        },
+        {
+          "display": "San Antonio Spurs",
+          "text": "San Antonio Spurs",
+          "value": "24"
+        },
+        {
+          "display": "Toronto Raptors",
+          "text": "Toronto Raptors",
+          "value": "28"
+        },
+        {
+          "display": "Utah Jazz",
+          "text": "Utah Jazz",
+          "value": "26"
+        },
+        {
+          "display": "Washington Wizards",
+          "text": "Washington Wizards",
+          "value": "27"
+        }
+      ]
+    },
+    {
+      "type": "dropdown",
+      "id": "team_color_background_style",
+      "name": "Team Background",
+      "description": "Color behind the team logos.",
+      "icon": "palette",
+      "default": "dim",
+      "options": [
+        {
+          "display": "Off",
+          "text": "Off",
+          "value": "off"
+        },
+        {
+          "display": "Dim",
+          "text": "Dim",
+          "value": "dim"
+        },
+        {
+          "display": "Full",
+          "text": "Full",
+          "value": "full"
+        }
+      ]
+    }
+  ]
+}

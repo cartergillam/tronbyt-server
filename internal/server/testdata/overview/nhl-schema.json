@@ -1,0 +1,200 @@
+{
+  "version": "1",
+  "schema": [
+    {
+      "type": "dropdown",
+      "id": "teamid",
+      "name": "Favorite Team",
+      "description": "Follow one team through its season, next game and last result.",
+      "icon": "star",
+      "default": "10",
+      "options": [
+        {
+          "display": "Anaheim Ducks",
+          "text": "Anaheim Ducks",
+          "value": "24"
+        },
+        {
+          "display": "Boston Bruins",
+          "text": "Boston Bruins",
+          "value": "6"
+        },
+        {
+          "display": "Buffalo Sabres",
+          "text": "Buffalo Sabres",
+          "value": "7"
+        },
+        {
+          "display": "Calgary Flames",
+          "text": "Calgary Flames",
+          "value": "20"
+        },
+        {
+          "display": "Carolina Hurricanes",
+          "text": "Carolina Hurricanes",
+          "value": "12"
+        },
+        {
+          "display": "Chicago Blackhawks",
+          "text": "Chicago Blackhawks",
+          "value": "16"
+        },
+        {
+          "display": "Colorado Avalanche",
+          "text": "Colorado Avalanche",
+          "value": "21"
+        },
+        {
+          "display": "Columbus Blue Jackets",
+          "text": "Columbus Blue Jackets",
+          "value": "29"
+        },
+        {
+          "display": "Dallas Stars",
+          "text": "Dallas Stars",
+          "value": "25"
+        },
+        {
+          "display": "Detroit Red Wings",
+          "text": "Detroit Red Wings",
+          "value": "17"
+        },
+        {
+          "display": "Edmonton Oilers",
+          "text": "Edmonton Oilers",
+          "value": "22"
+        },
+        {
+          "display": "Florida Panthers",
+          "text": "Florida Panthers",
+          "value": "13"
+        },
+        {
+          "display": "Los Angeles Kings",
+          "text": "Los Angeles Kings",
+          "value": "26"
+        },
+        {
+          "display": "Minnesota Wild",
+          "text": "Minnesota Wild",
+          "value": "30"
+        },
+        {
+          "display": "Montr\u00e9al Canadiens",
+          "text": "Montr\u00e9al Canadiens",
+          "value": "8"
+        },
+        {
+          "display": "Nashville Predators",
+          "text": "Nashville Predators",
+          "value": "18"
+        },
+        {
+          "display": "New Jersey Devils",
+          "text": "New Jersey Devils",
+          "value": "1"
+        },
+        {
+          "display": "New York Islanders",
+          "text": "New York Islanders",
+          "value": "2"
+        },
+        {
+          "display": "New York Rangers",
+          "text": "New York Rangers",
+          "value": "3"
+        },
+        {
+          "display": "Ottawa Senators",
+          "text": "Ottawa Senators",
+          "value": "9"
+        },
+        {
+          "display": "Philadelphia Flyers",
+          "text": "Philadelphia Flyers",
+          "value": "4"
+        },
+        {
+          "display": "Pittsburgh Penguins",
+          "text": "Pittsburgh Penguins",
+          "value": "5"
+        },
+        {
+          "display": "San Jose Sharks",
+          "text": "San Jose Sharks",
+          "value": "28"
+        },
+        {
+          "display": "Seattle Kraken",
+          "text": "Seattle Kraken",
+          "value": "55"
+        },
+        {
+          "display": "St. Louis Blues",
+          "text": "St. Louis Blues",
+          "value": "19"
+        },
+        {
+          "display": "Tampa Bay Lightning",
+          "text": "Tampa Bay Lightning",
+          "value": "14"
+        },
+        {
+          "display": "Toronto Maple Leafs",
+          "text": "Toronto Maple Leafs",
+          "value": "10"
+        },
+        {
+          "display": "Utah Mammoth",
+          "text": "Utah Mammoth",
+          "value": "68"
+        },
+        {
+          "display": "Vancouver Canucks",
+          "text": "Vancouver Canucks",
+          "value": "23"
+        },
+        {
+          "display": "Vegas Golden Knights",
+          "text": "Vegas Golden Knights",
+          "value": "54"
+        },
+        {
+          "display": "Washington Capitals",
+          "text": "Washington Capitals",
+          "value": "15"
+        },
+        {
+          "display": "Winnipeg Jets",
+          "text": "Winnipeg Jets",
+          "value": "52"
+        }
+      ]
+    },
+    {
+      "type": "dropdown",
+      "id": "team_color_background_style",
+      "name": "Team Background",
+      "description": "Color behind the team logos.",
+      "icon": "palette",
+      "default": "dim",
+      "options": [
+        {
+          "display": "Off",
+          "text": "Off",
+          "value": "off"
+        },
+        {
+          "display": "Dim",
+          "text": "Dim",
+          "value": "dim"
+        },
+        {
+          "display": "Full",
+          "text": "Full",
+          "value": "full"
+        }
+      ]
+    }
+  ]
+}

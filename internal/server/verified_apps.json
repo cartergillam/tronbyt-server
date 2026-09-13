@@ -50,6 +50,24 @@
     "recommended": false,
     "compatibilityNotes": "Candidate using server-managed OpenWeather One Call 3.0 data; requires configured credentials and physical approval."
   },
+  "nhl-overview": {
+    "verified": false,
+    "candidate": true,
+    "recommended": false,
+    "compatibilityNotes": "NHL team overview with server-normalized standings and schedules. Physical ben-frame validation pending."
+},
+  "nba-overview": {
+    "verified": false,
+    "candidate": true,
+    "recommended": false,
+    "compatibilityNotes": "NBA team overview with server-normalized standings and schedules. Physical ben-frame validation pending."
+},
+  "nfl-overview": {
+    "verified": false,
+    "candidate": true,
+    "recommended": false,
+    "compatibilityNotes": "NFL team overview with server-normalized standings and schedules. Physical ben-frame validation pending."
+},
   "nhl-live": {
     "verified": false,
     "candidate": true,

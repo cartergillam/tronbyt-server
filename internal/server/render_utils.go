@@ -209,6 +209,30 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 		}
 		encoded, _ := json.Marshal(snapshot)
 		config["$provider_data"] = string(encoded)
+	case "nhl-overview", "nba-overview", "nfl-overview":
+		overviewProvider, ok := s.SportsProvider.(providers.SportsOverviewProvider)
+		if !ok {
+			setError(providers.SportsUnavailable())
+			return
+		}
+		league := providers.LeagueID(strings.TrimSuffix(app.Name, "-overview"))
+		defaults := map[providers.LeagueID]string{providers.LeagueNHL: "10", providers.LeagueNBA: "13", providers.LeagueNFL: "2"}
+		teamID := providerTeamID(config["teamid"])
+		if teamID == "" {
+			teamID = providers.ProviderTeamID(defaults[league])
+		}
+		report, err := overviewProvider.Overview(ctx, providers.SportsScheduleRequest{League: league, TeamID: providers.ProviderTeamID(teamID), Timezone: device.GetTimezone()})
+		if err != nil {
+			setError(err)
+			return
+		}
+		report = report.WithLogos(ctx, s.SportsLogos)
+		encoded, err := json.Marshal(report)
+		if err != nil {
+			setError(providers.SportsUnavailable())
+			return
+		}
+		config["$overview_data"] = string(encoded)
 	case "nhl-live":
 		if s.SportsProvider == nil {
 			setError(providers.SportsUnavailable())

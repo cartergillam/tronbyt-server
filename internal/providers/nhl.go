@@ -29,10 +29,11 @@ const (
 // contract. The adapter is the only layer that understands NHL response
 // shapes, state codes, or abbreviation-based endpoint paths.
 type NHLAdapter struct {
-	Client  *http.Client
-	BaseURL string
-	Cache   *Cache[SportsSnapshot]
-	Now     func() time.Time
+	OverviewCache overviewCaches
+	Client        *http.Client
+	BaseURL       string
+	Cache         *Cache[SportsSnapshot]
+	Now           func() time.Time
 }
 
 func NewNHLAdapter(client *http.Client) *NHLAdapter {
@@ -40,7 +41,8 @@ func NewNHLAdapter(client *http.Client) *NHLAdapter {
 		client = &http.Client{Timeout: 8 * time.Second}
 	}
 	return &NHLAdapter{
-		Client: client, BaseURL: "https://api-web.nhle.com/v1",
+		OverviewCache: newOverviewCaches(),
+		Client:        client, BaseURL: "https://api-web.nhle.com/v1",
 		Cache: NewCache[SportsSnapshot](nhlMinimumFetchPeriod), Now: time.Now,
 	}
 }

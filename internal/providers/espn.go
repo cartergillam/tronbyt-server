@@ -29,12 +29,13 @@ const (
 // league-specific; normalized sports data is the only contract exposed to
 // renderers.
 type ESPNAdapter struct {
-	Client     *http.Client
-	BaseURL    string
-	NBABaseURL string
-	NFLBaseURL string
-	Cache      *Cache[SportsSnapshot]
-	Now        func() time.Time
+	OverviewCache overviewCaches
+	Client        *http.Client
+	BaseURL       string
+	NBABaseURL    string
+	NFLBaseURL    string
+	Cache         *Cache[SportsSnapshot]
+	Now           func() time.Time
 }
 
 func NewESPNAdapter(client *http.Client) *ESPNAdapter {
@@ -42,11 +43,12 @@ func NewESPNAdapter(client *http.Client) *ESPNAdapter {
 		client = &http.Client{Timeout: 8 * time.Second}
 	}
 	return &ESPNAdapter{
-		Client:     client,
-		BaseURL:    "https://site.api.espn.com/apis/site/v2/sports/football/cfl/scoreboard",
-		NBABaseURL: "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
-		NFLBaseURL: "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
-		Cache:      NewCache[SportsSnapshot](espnMinimumFetchPeriod), Now: time.Now,
+		OverviewCache: newOverviewCaches(),
+		Client:        client,
+		BaseURL:       "https://site.api.espn.com/apis/site/v2/sports/football/cfl/scoreboard",
+		NBABaseURL:    "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
+		NFLBaseURL:    "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
+		Cache:         NewCache[SportsSnapshot](espnMinimumFetchPeriod), Now: time.Now,
 	}
 }
 

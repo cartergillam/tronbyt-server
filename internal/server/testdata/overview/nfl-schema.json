@@ -1,0 +1,200 @@
+{
+  "version": "1",
+  "schema": [
+    {
+      "type": "dropdown",
+      "id": "teamid",
+      "name": "Favorite Team",
+      "description": "Follow one team through its season, next game and last result.",
+      "icon": "star",
+      "default": "2",
+      "options": [
+        {
+          "display": "Arizona Cardinals",
+          "text": "Arizona Cardinals",
+          "value": "22"
+        },
+        {
+          "display": "Atlanta Falcons",
+          "text": "Atlanta Falcons",
+          "value": "1"
+        },
+        {
+          "display": "Baltimore Ravens",
+          "text": "Baltimore Ravens",
+          "value": "33"
+        },
+        {
+          "display": "Buffalo Bills",
+          "text": "Buffalo Bills",
+          "value": "2"
+        },
+        {
+          "display": "Carolina Panthers",
+          "text": "Carolina Panthers",
+          "value": "29"
+        },
+        {
+          "display": "Chicago Bears",
+          "text": "Chicago Bears",
+          "value": "3"
+        },
+        {
+          "display": "Cincinnati Bengals",
+          "text": "Cincinnati Bengals",
+          "value": "4"
+        },
+        {
+          "display": "Cleveland Browns",
+          "text": "Cleveland Browns",
+          "value": "5"
+        },
+        {
+          "display": "Dallas Cowboys",
+          "text": "Dallas Cowboys",
+          "value": "6"
+        },
+        {
+          "display": "Denver Broncos",
+          "text": "Denver Broncos",
+          "value": "7"
+        },
+        {
+          "display": "Detroit Lions",
+          "text": "Detroit Lions",
+          "value": "8"
+        },
+        {
+          "display": "Green Bay Packers",
+          "text": "Green Bay Packers",
+          "value": "9"
+        },
+        {
+          "display": "Houston Texans",
+          "text": "Houston Texans",
+          "value": "34"
+        },
+        {
+          "display": "Indianapolis Colts",
+          "text": "Indianapolis Colts",
+          "value": "11"
+        },
+        {
+          "display": "Jacksonville Jaguars",
+          "text": "Jacksonville Jaguars",
+          "value": "30"
+        },
+        {
+          "display": "Kansas City Chiefs",
+          "text": "Kansas City Chiefs",
+          "value": "12"
+        },
+        {
+          "display": "Las Vegas Raiders",
+          "text": "Las Vegas Raiders",
+          "value": "13"
+        },
+        {
+          "display": "Los Angeles Chargers",
+          "text": "Los Angeles Chargers",
+          "value": "24"
+        },
+        {
+          "display": "Los Angeles Rams",
+          "text": "Los Angeles Rams",
+          "value": "14"
+        },
+        {
+          "display": "Miami Dolphins",
+          "text": "Miami Dolphins",
+          "value": "15"
+        },
+        {
+          "display": "Minnesota Vikings",
+          "text": "Minnesota Vikings",
+          "value": "16"
+        },
+        {
+          "display": "New England Patriots",
+          "text": "New England Patriots",
+          "value": "17"
+        },
+        {
+          "display": "New Orleans Saints",
+          "text": "New Orleans Saints",
+          "value": "18"
+        },
+        {
+          "display": "New York Giants",
+          "text": "New York Giants",
+          "value": "19"
+        },
+        {
+          "display": "New York Jets",
+          "text": "New York Jets",
+          "value": "20"
+        },
+        {
+          "display": "Philadelphia Eagles",
+          "text": "Philadelphia Eagles",
+          "value": "21"
+        },
+        {
+          "display": "Pittsburgh Steelers",
+          "text": "Pittsburgh Steelers",
+          "value": "23"
+        },
+        {
+          "display": "San Francisco 49ers",
+          "text": "San Francisco 49ers",
+          "value": "25"
+        },
+        {
+          "display": "Seattle Seahawks",
+          "text": "Seattle Seahawks",
+          "value": "26"
+        },
+        {
+          "display": "Tampa Bay Buccaneers",
+          "text": "Tampa Bay Buccaneers",
+          "value": "27"
+        },
+        {
+          "display": "Tennessee Titans",
+          "text": "Tennessee Titans",
+          "value": "10"
+        },
+        {
+          "display": "Washington Commanders",
+          "text": "Washington Commanders",
+          "value": "28"
+        }
+      ]
+    },
+    {
+      "type": "dropdown",
+      "id": "team_color_background_style",
+      "name": "Team Background",
+      "description": "Color behind the team logos.",
+      "icon": "palette",
+      "default": "dim",
+      "options": [
+        {
+          "display": "Off",
+          "text": "Off",
+          "value": "off"
+        },
+        {
+          "display": "Dim",
+          "text": "Dim",
+          "value": "dim"
+        },
+        {
+          "display": "Full",
+          "text": "Full",
+          "value": "full"
+        }
+      ]
+    }
+  ]
+}
