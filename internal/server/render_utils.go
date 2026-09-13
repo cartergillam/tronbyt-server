@@ -160,6 +160,28 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 		}
 		encoded, _ := json.Marshal(quotes)
 		config["$provider_data"] = string(encoded)
+	case "tronbyt-weather":
+		if !device.HasLocation() {
+			setError(providers.SanitizedError{Code: "weather_location_missing", Message: "Set the device location"})
+			return
+		}
+		if s.ForecastProvider == nil {
+			setError(providers.TemporarilyUnavailable())
+			return
+		}
+		location := providers.Location{Latitude: device.Location.Lat, Longitude: device.Location.Lng, Timezone: device.GetTimezone(), Label: device.Location.Description}
+		units, _ := config["units"].(string)
+		if units != "imperial" {
+			units = "metric"
+		}
+		mode, _ := config["mode"].(string)
+		report, err := s.ForecastProvider.Forecast(ctx, providers.WeatherRequest{Location: location, Units: "metric", DailyOnly: mode == "forecast"})
+		if err != nil {
+			setError(err)
+			return
+		}
+		encoded, _ := json.Marshal(report.ForDisplay(time.Now(), units))
+		config["$provider_data"] = string(encoded)
 	case "local-weather":
 		if credentialID == "" {
 			setError(providers.MissingCredential("Weather"))

@@ -99,6 +99,7 @@ type Location struct {
 
 type WeatherRequest struct {
 	Location     Location
+	DailyOnly    bool // Resource intent, not a cache identity or provider-specific mode.
 	Units        string
 	CredentialID string
 	ScopeType    string

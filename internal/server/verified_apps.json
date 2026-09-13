@@ -38,6 +38,12 @@
     "recommended": false,
     "compatibilityNotes": "Candidate using server-managed Twelve Data quotes; requires configured credentials and physical approval."
   },
+  "tronbyt-weather": {
+    "verified": false,
+    "candidate": true,
+    "recommended": false,
+    "compatibilityNotes": "Weather v1 uses saved device location and server-managed normalized forecasts. Deterministic renders pass; physical approval is still required."
+  },
   "local-weather": {
     "verified": false,
     "candidate": true,

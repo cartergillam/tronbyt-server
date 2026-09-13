@@ -40,26 +40,27 @@ import (
 )
 
 type Server struct {
-	DB              *gorm.DB
-	Router          *http.ServeMux
-	DataDir         string
-	BaseTemplates   *template.Template
-	PageTemplates   map[string]*template.Template
-	Config          *config.Settings
-	Store           *sessions.CookieStore
-	Bundle          *i18n.Bundle // Add i18n bundle
-	Broadcaster     *syncer.Broadcaster
-	Upgrader        *websocket.Upgrader
-	PromRegistry    prometheus.Registerer
-	PromGatherer    prometheus.Gatherer
-	metrics         *appMetrics
-	OIDCProvider    *OIDCProvider
-	CredentialStore *credentials.Store
-	Provisioning    *provisioning.Service
-	MarketProvider  providers.MarketProvider
-	WeatherProvider providers.WeatherProvider
-	SportsProvider  providers.SportsProvider
-	SportsLogos     providers.SportsLogoHydrator
+	DB               *gorm.DB
+	Router           *http.ServeMux
+	DataDir          string
+	BaseTemplates    *template.Template
+	PageTemplates    map[string]*template.Template
+	Config           *config.Settings
+	Store            *sessions.CookieStore
+	Bundle           *i18n.Bundle // Add i18n bundle
+	Broadcaster      *syncer.Broadcaster
+	Upgrader         *websocket.Upgrader
+	PromRegistry     prometheus.Registerer
+	PromGatherer     prometheus.Gatherer
+	metrics          *appMetrics
+	OIDCProvider     *OIDCProvider
+	CredentialStore  *credentials.Store
+	Provisioning     *provisioning.Service
+	MarketProvider   providers.MarketProvider
+	WeatherProvider  providers.WeatherProvider
+	ForecastProvider providers.ForecastProvider
+	SportsProvider   providers.SportsProvider
+	SportsLogos      providers.SportsLogoHydrator
 
 	systemAppsCache      []apps.AppMetadata
 	systemAppsCacheMutex sync.RWMutex
@@ -138,7 +139,8 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 			providers.LeagueNFL: espnSports,
 			providers.LeagueMLB: mlbSports,
 		}),
-		SportsLogos: providers.NewSportsLogoCache(nil),
+		SportsLogos:      providers.NewSportsLogoCache(nil),
+		ForecastProvider: providers.NewOpenMeteoAdapter(nil),
 	}
 	if cfg.ProviderCredentialMasterKey != "" {
 		store, err := credentials.NewStore(db, cfg.ProviderCredentialMasterKey)
