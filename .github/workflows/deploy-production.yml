@@ -7,6 +7,7 @@ on:
         description: Full SHA of the reviewed tronbyt-apps commit to deploy
         required: true
         type: string
+        default: 0b2395e8e8a9ce071c5689e6e3b4ff8af0690a09
 
 permissions:
   contents: read
@@ -111,9 +112,25 @@ jobs:
           test -f "$override_file"
           # Refuse a deployment that would cause server startup to bootstrap an
           # apps checkout. This workflow never clones or pulls the apps repo.
-          test -d data/system-apps/.git
-          test "$(git -C data/system-apps remote get-url origin)" = "https://github.com/cartergillam/apps.git"
-          test "$(git -C data/system-apps branch --show-current)" = "feature/mlb-clock-reliability"
+          old_container_id="$(docker compose ps -q web)"
+          test -n "$old_container_id"
+          data_mount_info="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{printf "%s\t%s\n" .Type .Source}}{{end}}{{end}}' "$old_container_id")"
+          if [[ -z "$data_mount_info" || "$data_mount_info" == *$'\n'* || "$data_mount_info" != *$'\t'* ]]; then
+            echo 'ERROR: expected exactly one Docker mount at /app/data.' >&2
+            exit 1
+          fi
+          IFS=$'\t' read -r data_mount_type data_dir <<< "$data_mount_info"
+          if [[ "$data_mount_type" != "volume" || -z "$data_dir" ]]; then
+            echo 'ERROR: /app/data is not backed by a Docker named volume.' >&2
+            exit 1
+          fi
+          data_dir="$(sudo realpath -- "$data_dir")"
+          system_apps_dir="$(sudo realpath -- "$data_dir/system-apps")"
+          sudo test -e "$system_apps_dir/.git"
+          # Root owns the persistent volume on Oracle. Trust only this canonical
+          # checkout, for these Git commands; do not alter global Git config.
+          test "$(sudo git -c "safe.directory=$system_apps_dir" -C "$system_apps_dir" remote get-url origin)" = "https://github.com/cartergillam/apps.git"
+          test "$(sudo git -c "safe.directory=$system_apps_dir" -C "$system_apps_dir" branch --show-current)" = "feature/mlb-clock-reliability"
 
           backup_file="${override_file}.deploy-${deployment_timestamp//[:]/}.bak"
           cp -p "$override_file" "$backup_file"
@@ -176,8 +193,6 @@ jobs:
           # Validate Compose without emitting resolved environment values.
           docker compose config -q
 
-          old_container_id="$(docker compose ps -q web)"
-          test -n "$old_container_id"
           old_image_id="$(docker inspect --format '{{.Image}}' "$old_container_id")"
           old_image_ref="$(docker inspect --format '{{.Config.Image}}' "$old_container_id")"
 
