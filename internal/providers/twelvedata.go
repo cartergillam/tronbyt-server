@@ -21,6 +21,7 @@ const (
 	marketStaleTTL         = 72 * time.Hour
 	marketRateLimitBackoff = 15 * time.Minute
 	marketFailureRetry     = 30 * time.Second
+	marketProviderID       = "twelve-data"
 )
 
 type marketFailure struct {
@@ -46,6 +47,15 @@ type TwelveDataAdapter struct {
 	backoffUntil map[string]time.Time
 	failureMu    sync.Mutex
 	failures     map[string]marketFailure
+	quoteStateMu sync.Mutex
+	quoteState   map[string]marketQuoteState
+}
+
+type marketQuoteState struct {
+	LastSuccessfulQuoteTimestamp time.Time
+	LastRefreshAttempt           time.Time
+	FailureReason                string
+	CredentialID                 string
 }
 
 func NewTwelveDataAdapter(credentials CredentialResolver, client *http.Client) *TwelveDataAdapter {
@@ -62,6 +72,7 @@ func NewTwelveDataAdapter(credentials CredentialResolver, client *http.Client) *
 		searchLast:   make(map[string]time.Time),
 		backoffUntil: make(map[string]time.Time),
 		failures:     make(map[string]marketFailure),
+		quoteState:   make(map[string]marketQuoteState),
 	}
 }
 

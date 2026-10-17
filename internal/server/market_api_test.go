@@ -13,8 +13,9 @@ import (
 )
 
 type marketSearchStub struct {
-	requests []providers.MarketSearchRequest
-	quotes   []providers.MarketRequest
+	requests    []providers.MarketSearchRequest
+	quotes      []providers.MarketRequest
+	diagnostics []providers.MarketRequest
 }
 
 func (stub *marketSearchStub) Search(_ context.Context, request providers.MarketSearchRequest) ([]providers.MarketListing, error) {
@@ -25,6 +26,35 @@ func (stub *marketSearchStub) Quotes(_ context.Context, request providers.Market
 	stub.quotes = append(stub.quotes, request)
 	return []providers.MarketQuote{{Symbol: "SHOP", Currency: "CAD"}}, nil
 }
+func (stub *marketSearchStub) QuoteDiagnostics(_ context.Context, request providers.MarketRequest) ([]providers.MarketQuoteDiagnostic, error) {
+	stub.diagnostics = append(stub.diagnostics, request)
+	return []providers.MarketQuoteDiagnostic{{Symbol: "AAPL", ProviderID: "twelve-data", CredentialID: request.CredentialID, FailureReason: "NETWORK_ERROR", Stale: true, RetryBackoffActive: true}}, nil
+}
+
+func TestMarketQuoteDiagnosticsAreOwnerOnlyAndSanitized(t *testing.T) {
+	s := newTestServerAPI(t)
+	stub := &marketSearchStub{}
+	s.MarketProvider = stub
+	require.NoError(t, s.DB.Create(&data.App{DeviceID: "testdevice", Iname: "103", Name: "market-watch", Enabled: true, Config: data.JSONMap{"symbols": "AAPL"}}).Error)
+	path := "/v0/devices/testdevice/market/diagnostics"
+
+	denied := httptest.NewRecorder()
+	s.ServeHTTP(denied, newAPIRequest(http.MethodGet, path, "device_api_key", nil))
+	assert.Equal(t, http.StatusForbidden, denied.Code)
+	assert.Empty(t, stub.diagnostics)
+
+	allowed := httptest.NewRecorder()
+	s.ServeHTTP(allowed, newAPIRequest(http.MethodGet, path, "test_api_key", nil))
+	assert.Equal(t, http.StatusOK, allowed.Code, allowed.Body.String())
+	assert.Equal(t, "no-store", allowed.Header().Get("Cache-Control"))
+	require.Len(t, stub.diagnostics, 1)
+	assert.Equal(t, "testuser", stub.diagnostics[0].ScopeID)
+	assert.Equal(t, "server_owner", stub.diagnostics[0].ScopeType)
+	assert.Equal(t, "market-primary", stub.diagnostics[0].CredentialID)
+	assert.NotContains(t, allowed.Body.String(), "authorization")
+	assert.NotContains(t, allowed.Body.String(), "apikey")
+}
+
 func TestMarketSearchAuthorizationAndOwnerScope(t *testing.T) {
 	s := newTestServerAPI(t)
 	stub := &marketSearchStub{}

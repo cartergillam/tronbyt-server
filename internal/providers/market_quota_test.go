@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"image"
 	"io"
 	"net/http"
@@ -16,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -84,6 +87,79 @@ func TestMarketQuotaSharedListingBatchAndConcurrentRenders(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 2, calls2.Load())
 }
+
+func TestMarketQuoteDiagnosticsRetainSanitizedStaleFailure(t *testing.T) {
+	calls := &atomic.Int32{}
+	a := NewTwelveDataAdapter(fakeResolver{secret: "secret-never-exposed"}, &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			return jsonResponse(200, quotaFixture("AAPL", true)), nil
+		}
+		return nil, errors.New("https://private.example/?apikey=secret-never-exposed: connection reset")
+	})})
+	request := quotaRequest("AAPL")
+	quotes, err := a.Quotes(t.Context(), request)
+	require.NoError(t, err)
+	require.False(t, quotes[0].Stale)
+
+	expireQuotes(a, 6*time.Minute)
+	quotes, err = a.Quotes(t.Context(), request)
+	require.NoError(t, err)
+	require.True(t, quotes[0].Stale)
+	require.EqualValues(t, 2, calls.Load())
+
+	diagnostics, err := a.QuoteDiagnostics(t.Context(), request)
+	require.NoError(t, err)
+	require.Len(t, diagnostics, 1)
+	assert.Equal(t, "AAPL", diagnostics[0].Symbol)
+	assert.Equal(t, "NETWORK_ERROR", diagnostics[0].FailureReason)
+	assert.Equal(t, "twelve-data", diagnostics[0].ProviderID)
+	assert.Equal(t, "primary", diagnostics[0].CredentialID)
+	assert.True(t, diagnostics[0].Stale)
+	assert.True(t, diagnostics[0].RetryBackoffActive)
+	assert.False(t, diagnostics[0].LastSuccessfulQuoteTimestamp.IsZero())
+	assert.False(t, diagnostics[0].LastRefreshAttempt.IsZero())
+	assert.EqualValues(t, 2, calls.Load(), "diagnostics must never refresh the provider")
+	encoded, err := json.Marshal(diagnostics)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "secret-never-exposed")
+	assert.NotContains(t, string(encoded), "private.example")
+}
+
+func TestMarketDiagnosticFailureReasonCategories(t *testing.T) {
+	cases := []struct{ code, want string }{
+		{"provider_rate_limited", "RATE_LIMITED"},
+		{"provider_entitlement_required", "PLAN_REQUIRED"},
+		{"provider_credential_invalid", "INVALID_CREDENTIAL"},
+		{"provider_credential_missing", "INVALID_CREDENTIAL"},
+		{"invalid_symbol", "INVALID_SYMBOL"},
+		{"provider_response_invalid", "BAD_RESPONSE"},
+		{"listing_mismatch", "BAD_RESPONSE"},
+		{"provider_network_error", "NETWORK_ERROR"},
+		{"other", "PROVIDER_ERROR"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.code, func(t *testing.T) {
+			assert.Equal(t, tc.want, marketDiagnosticFailureReason(SanitizedError{Code: tc.code, Message: "secret raw details"}))
+		})
+	}
+}
+
+func TestNetworkDiagnosticReasonPreservesRendererErrorCode(t *testing.T) {
+	a := NewTwelveDataAdapter(fakeResolver{secret: "secret"}, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("private transport details")
+	})})
+	request := quotaRequest()
+	request.Listings = []MarketListing{{Symbol: "AAPL", MIC: "XNAS", Currency: "USD"}}
+	quotes, err := a.Quotes(t.Context(), request)
+	require.NoError(t, err)
+	require.Len(t, quotes, 1)
+	assert.Equal(t, "provider_temporarily_unavailable", quotes[0].ErrorCode)
+	diagnostics, err := a.QuoteDiagnostics(t.Context(), request)
+	require.NoError(t, err)
+	require.Len(t, diagnostics, 1)
+	assert.Equal(t, "NETWORK_ERROR", diagnostics[0].FailureReason)
+}
+
 func TestMarketQuotaOpenClosedAndUnknownFreshness(t *testing.T) {
 	for _, open := range []bool{true, false} {
 		a, calls := quotaAdapter(t, open)

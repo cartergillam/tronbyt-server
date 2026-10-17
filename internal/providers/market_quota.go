@@ -122,7 +122,7 @@ func (a *TwelveDataAdapter) quoteBody(ctx context.Context, query url.Values, sec
 	req.Header.Set("Authorization", "apikey "+strings.TrimSpace(secret))
 	resp, err := a.Client.Do(req)
 	if err != nil {
-		return nil, 0, TemporarilyUnavailable()
+		return nil, 0, SanitizedError{Code: "provider_network_error", Message: "Market data is temporarily unavailable", Retryable: true}
 	}
 	defer resp.Body.Close()
 	a.observeCredits(secret, resp.Header)
@@ -218,6 +218,7 @@ func (a *TwelveDataAdapter) listingQuotes(ctx context.Context, r MarketRequest) 
 	failures := map[string]error{}
 	for _, group := range groupOrder {
 		indices := groups[group]
+		attemptAt := time.Now()
 		var err error
 		if a.rateLimited(scope) {
 			err = marketQuotaError()
@@ -271,12 +272,14 @@ func (a *TwelveDataAdapter) listingQuotes(ctx context.Context, r MarketRequest) 
 			if symbolErr != nil {
 				failures[in.key] = symbolErr
 				a.recordFailure(in.key, symbolErr)
+				a.recordQuoteState(in.key, attemptAt, r.CredentialID, time.Time{}, marketDiagnosticFailureReason(symbolErr))
 				if err == nil {
 					a.recordBackoff(scope, symbolErr)
 				}
 			} else {
 				fetched[in.key] = quote
 				a.clearFailure(in.key)
+				a.recordQuoteState(in.key, attemptAt, r.CredentialID, quote.QuoteTimestamp, "")
 				a.usageMu.Lock()
 				a.diagnostics.SymbolsRefreshed++
 				a.usageMu.Unlock()
@@ -315,6 +318,11 @@ func (a *TwelveDataAdapter) listingQuotes(ctx context.Context, r MarketRequest) 
 			var classified SanitizedError
 			if errors.As(err, &classified) {
 				code = classified.Code
+				if code == "provider_network_error" {
+					// Keep the existing renderer-facing error contract; the richer
+					// network category is exposed only through owner diagnostics.
+					code = "provider_temporarily_unavailable"
+				}
 			}
 			q := MarketQuote{Symbol: in.symbol, ErrorCode: code, MarketStatus: MarketUnknown}
 			if in.listing != nil {
@@ -335,6 +343,110 @@ func (a *TwelveDataAdapter) listingQuotes(ctx context.Context, r MarketRequest) 
 	// Preserve the existing single-symbol error contract, including INVALID KEY.
 	if len(result) == 1 && result[0].ErrorCode != "" && inputs[0].listing == nil {
 		return nil, firstErr
+	}
+	return result, nil
+}
+
+func marketDiagnosticFailureReason(err error) string {
+	var classified SanitizedError
+	if !errors.As(err, &classified) {
+		return "PROVIDER_ERROR"
+	}
+	switch classified.Code {
+	case "provider_rate_limited":
+		return "RATE_LIMITED"
+	case "provider_entitlement_required":
+		return "PLAN_REQUIRED"
+	case "provider_credential_invalid", "provider_credential_missing":
+		return "INVALID_CREDENTIAL"
+	case "invalid_symbol":
+		return "INVALID_SYMBOL"
+	case "provider_response_invalid", "listing_mismatch":
+		return "BAD_RESPONSE"
+	case "provider_network_error":
+		return "NETWORK_ERROR"
+	default:
+		return "PROVIDER_ERROR"
+	}
+}
+
+func (a *TwelveDataAdapter) recordQuoteState(key string, attempted time.Time, credentialID string, successfulQuote time.Time, failureReason string) {
+	a.quoteStateMu.Lock()
+	defer a.quoteStateMu.Unlock()
+	state := a.quoteState[key]
+	state.LastRefreshAttempt = attempted
+	state.CredentialID = credentialID
+	if !successfulQuote.IsZero() {
+		state.LastSuccessfulQuoteTimestamp = successfulQuote
+	}
+	state.FailureReason = failureReason
+	a.quoteState[key] = state
+}
+
+// QuoteDiagnostics reports the current in-memory quote/cache state only. It
+// does not resolve a provider secret or initiate a provider request.
+func (a *TwelveDataAdapter) QuoteDiagnostics(ctx context.Context, request MarketRequest) ([]MarketQuoteDiagnostic, error) {
+	if err := request.Validate(); err != nil {
+		return nil, err
+	}
+	scope, err := a.credentialCacheScope(ctx, request.CredentialID, request.ScopeType, request.ScopeID)
+	if err != nil {
+		return nil, MissingCredential("Market data")
+	}
+	inputs := make([]quoteInput, 0, max(len(request.Symbols), len(request.Listings)))
+	if request.Listings != nil {
+		raw, _ := json.Marshal(request.Listings)
+		listings, err := ParseMarketWatchlist(string(raw))
+		if err != nil {
+			return nil, err
+		}
+		for i := range listings {
+			listing := listings[i]
+			inputs = append(inputs, quoteInput{key: scope + ":" + listing.ID + ":" + listing.Currency, symbol: listing.Symbol, listing: &listing})
+		}
+	} else {
+		for _, raw := range request.Symbols {
+			symbol, _ := NormalizeMarketSymbol(raw)
+			inputs = append(inputs, quoteInput{key: scope + ":" + symbol, symbol: symbol})
+		}
+	}
+
+	now := time.Now()
+	result := make([]MarketQuoteDiagnostic, 0, len(inputs))
+	for _, input := range inputs {
+		state := marketQuoteState{}
+		a.quoteStateMu.Lock()
+		state = a.quoteState[input.key]
+		a.quoteStateMu.Unlock()
+
+		entry, found := cacheEntry[[]MarketQuote]{}, false
+		a.Cache.mu.Lock()
+		entry, found = a.Cache.entries[input.key]
+		a.Cache.mu.Unlock()
+		stale := found && now.After(entry.freshUntil) && now.Before(entry.staleUntil)
+
+		retryAt := time.Time{}
+		a.failureMu.Lock()
+		if failure, ok := a.failures[input.key]; ok && now.Before(failure.until) {
+			retryAt = failure.until
+		}
+		a.failureMu.Unlock()
+		a.backoffMu.Lock()
+		if until := a.backoffUntil[scope]; now.Before(until) && until.After(retryAt) {
+			retryAt = until
+		}
+		a.backoffMu.Unlock()
+
+		diagnostic := MarketQuoteDiagnostic{
+			Symbol: input.symbol, LastSuccessfulQuoteTimestamp: state.LastSuccessfulQuoteTimestamp,
+			LastRefreshAttempt: state.LastRefreshAttempt, FailureReason: state.FailureReason,
+			ProviderID: marketProviderID, CredentialID: request.CredentialID,
+			Stale: stale, RetryBackoffActive: now.Before(retryAt), RetryAt: retryAt,
+		}
+		if state.CredentialID != "" {
+			diagnostic.CredentialID = state.CredentialID
+		}
+		result = append(result, diagnostic)
 	}
 	return result, nil
 }

@@ -51,6 +51,27 @@ type MarketRequest struct {
 	ScopeID      string
 }
 
+// MarketQuoteDiagnostic is an owner-only operational summary. It deliberately
+// contains logical credential identity and sanitized categories only; never
+// provider response text, request data, or credential material.
+type MarketQuoteDiagnostic struct {
+	Symbol                       string    `json:"symbol"`
+	LastSuccessfulQuoteTimestamp time.Time `json:"lastSuccessfulQuoteTimestamp,omitempty"`
+	LastRefreshAttempt           time.Time `json:"lastRefreshAttempt,omitempty"`
+	FailureReason                string    `json:"failureReason,omitempty"`
+	ProviderID                   string    `json:"providerID"`
+	CredentialID                 string    `json:"credentialID,omitempty"`
+	Stale                        bool      `json:"stale"`
+	RetryBackoffActive           bool      `json:"retryBackoffActive"`
+	RetryAt                      time.Time `json:"retryAt,omitempty"`
+}
+
+// MarketQuoteDiagnosticProvider reads adapter cache state and must not refresh
+// quotes as a side effect.
+type MarketQuoteDiagnosticProvider interface {
+	QuoteDiagnostics(context.Context, MarketRequest) ([]MarketQuoteDiagnostic, error)
+}
+
 var marketSymbolPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9.-]{0,14}(:[A-Z0-9][A-Z0-9.-]{0,14})?$`)
 
 func NormalizeMarketSymbol(value string) (string, error) {
