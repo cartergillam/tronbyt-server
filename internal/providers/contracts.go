@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,6 +29,7 @@ type MarketQuote struct {
 	Symbol           string       `json:"symbol"`
 	DisplayName      string       `json:"displayName"`
 	Price            float64      `json:"price"`
+	PreviousClose    float64      `json:"previousClose,omitempty"`
 	AbsoluteChange   float64      `json:"absoluteChange"`
 	PercentageChange float64      `json:"percentageChange"`
 	Exchange         string       `json:"exchange,omitempty"`
@@ -36,9 +38,8 @@ type MarketQuote struct {
 	MarketStatus     MarketStatus `json:"marketStatus"`
 	QuoteTimestamp   time.Time    `json:"quoteTimestamp"`
 	ProviderUpdated  time.Time    `json:"providerUpdated"`
-	// Delayed is set only when Twelve Data explicitly identifies the quote as
-	// end-of-day or delayed. It is distinct from Stale, which means the server
-	// is showing a bounded last-known-good response after a failed refresh.
+	// Delayed marks an explicitly delayed/EOD quote, or a conservative label
+	// when a provider's freshness cannot be verified. It is distinct from Stale.
 	Delayed bool `json:"delayed"`
 	Stale   bool `json:"stale"`
 }
@@ -49,6 +50,7 @@ type MarketRequest struct {
 	CredentialID string
 	ScopeType    string
 	ScopeID      string
+	MaxSymbols   int
 }
 
 // MarketQuoteDiagnostic is an owner-only operational summary. It deliberately
@@ -85,11 +87,15 @@ func NormalizeMarketSymbol(value string) (string, error) {
 func (request MarketRequest) Validate() error {
 	if request.Listings != nil {
 		raw, _ := json.Marshal(request.Listings)
-		_, err := ParseMarketWatchlist(string(raw))
+		_, err := ParseMarketWatchlistLimit(string(raw), request.MaxSymbols)
 		return err
 	}
-	if len(request.Symbols) == 0 || len(request.Symbols) > MaxMarketSymbols {
-		return SanitizedError{Code: "market_symbol_limit", Message: "Choose between 1 and 10 market symbols", Retryable: false}
+	maxSymbols := request.MaxSymbols
+	if maxSymbols < 1 || maxSymbols > MaxMarketSymbols {
+		maxSymbols = MaxMarketSymbols
+	}
+	if len(request.Symbols) == 0 || len(request.Symbols) > maxSymbols {
+		return SanitizedError{Code: "market_symbol_limit", Message: "Choose between 1 and " + strconv.Itoa(maxSymbols) + " market symbols to protect shared market-data limits", Retryable: false}
 	}
 	seen := map[string]bool{}
 	for _, symbol := range request.Symbols {
@@ -103,9 +109,9 @@ func (request MarketRequest) Validate() error {
 	return nil
 }
 
-// MaxMarketSymbols is the display cap; per-listing cadence and credit
-// reservations independently protect the Twelve Data Basic budget.
-const MaxMarketSymbols = 10
+// MaxMarketSymbols is the safe hard ceiling for a Market Watch installation.
+// Administrators may configure a stricter limit, but cannot raise this cap.
+const MaxMarketSymbols = 8
 
 type MarketProvider interface {
 	Quotes(context.Context, MarketRequest) ([]MarketQuote, error)

@@ -13,6 +13,8 @@ type Settings struct {
 	DBDSN                       string `env:"DB_DSN"                   envDefault:"data/tronbyt.db"`
 	DataDir                     string `env:"DATA_DIR"                 envDefault:"data"`
 	Production                  bool   `env:"PRODUCTION"               envDefault:"true"`
+	LocalDevelopment            bool   `env:"TRONBYT_LOCAL_DEVELOPMENT"`
+	ExperimentalYahooFinance    bool   `env:"TRONBYT_EXPERIMENTAL_YAHOO_FINANCE"`
 	EnableUserRegistration      bool   `env:"ENABLE_USER_REGISTRATION" envDefault:"true"`
 	EnablePprof                 bool   `env:"ENABLE_PPROF"`
 	MaxUsers                    int    `env:"MAX_USERS"`
@@ -35,6 +37,12 @@ type Settings struct {
 	AltSvcMode                  string `env:"ALT_SVC_MODE"             envDefault:"external"` // "internal" or "external"
 	ProviderCredentialMasterKey string `env:"PROVIDER_CREDENTIAL_MASTER_KEY"`
 	PairingCodeSecret           string `env:"PAIRING_CODE_SECRET"`
+	MarketMaxSymbols            int    `env:"MARKET_MAX_SYMBOLS" envDefault:"8"`
+	MarketOpenRefreshMinutes    int    `env:"MARKET_OPEN_REFRESH_MINUTES" envDefault:"15"`
+	MarketClosedRefreshMinutes  int    `env:"MARKET_CLOSED_REFRESH_MINUTES" envDefault:"60"`
+	MarketDailyCreditBudget     int    `env:"MARKET_DAILY_CREDIT_BUDGET" envDefault:"500"`
+	MarketMinuteCreditBudget    int    `env:"MARKET_MINUTE_CREDIT_BUDGET" envDefault:"6"`
+	MarketNewSymbolsDaily       int    `env:"MARKET_NEW_SYMBOLS_DAILY" envDefault:"16"`
 
 	// OIDC Configuration
 	OIDCEnabled         bool   `env:"OIDC_ENABLED"`
@@ -59,6 +67,12 @@ func (s *Settings) SystemAppsDir() string {
 // the source advertised by the running server.
 func (s *Settings) SystemAppsRepoExplicit() bool {
 	return s != nil && s.systemAppsRepoExplicit
+}
+
+// YahooFinanceExperimentEnabled is intentionally impossible in production.
+// The unofficial endpoint remains disabled until its terms authorize use.
+func (s *Settings) YahooFinanceExperimentEnabled() bool {
+	return s != nil && !s.Production && s.LocalDevelopment && s.ExperimentalYahooFinance
 }
 
 // TemplateConfig holds configuration values needed in templates.

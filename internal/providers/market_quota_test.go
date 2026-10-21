@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"os"
@@ -166,10 +167,11 @@ func TestMarketQuotaOpenClosedAndUnknownFreshness(t *testing.T) {
 		_, err := a.Quotes(t.Context(), quotaRequest("AAPL"))
 		require.NoError(t, err)
 		e := a.Cache.entries["server_owner:owner:primary:AAPL"]
-		ttl := marketClosedFreshTTL
+		quote := MarketQuote{MarketStatus: MarketClosed, MIC: "XNAS", QuoteTimestamp: time.Unix(1786028400, 0)}
 		if open {
-			ttl = marketOpenFreshTTL
+			quote.MarketStatus = MarketOpen
 		}
+		ttl := marketQuoteTTL(quote, time.Now())
 		require.WithinDuration(t, time.Now().Add(ttl), e.freshUntil, time.Second)
 		require.Greater(t, e.staleUntil.Sub(e.freshUntil), 24*time.Hour)
 		for range 10 {
@@ -178,9 +180,12 @@ func TestMarketQuotaOpenClosedAndUnknownFreshness(t *testing.T) {
 		}
 		require.EqualValues(t, 1, calls.Load())
 	}
-	require.Equal(t, 5*time.Minute, marketOpenFreshTTL)
+	require.Equal(t, 15*time.Minute, marketOpenFreshTTL)
 	require.Equal(t, time.Hour, marketClosedFreshTTL)
 	require.Equal(t, time.Hour, marketQuoteTTL(MarketQuote{MarketStatus: MarketUnknown}, time.Now()))
+	closedTTL := marketQuoteTTL(MarketQuote{MarketStatus: MarketClosed, MIC: "XNAS", QuoteTimestamp: time.Now()}, time.Now())
+	require.Greater(t, closedTTL, time.Duration(0))
+	require.LessOrEqual(t, closedTTL, time.Hour, "a known pre-open quote is refreshed at the opening bell if sooner than the closed TTL")
 }
 func TestMarketQuotaLowHeadroomLKGAndReset(t *testing.T) {
 	a, calls := quotaAdapter(t, true)
@@ -201,8 +206,8 @@ func TestMarketQuotaLowHeadroomLKGAndReset(t *testing.T) {
 	a.usageMu.Lock()
 	k := sha256.Sum256([]byte("secret"))
 	u := a.usage[k]
-	u.Reservations = nil
-	u.MinuteUntil = time.Now().Add(-time.Second)
+	u.MinuteBucket = 0
+	u.ObservedAt = time.Time{}
 	a.usage[k] = u
 	a.usageMu.Unlock()
 	a.failureMu.Lock()
@@ -248,21 +253,97 @@ func TestMarketQuotaCreditHeadersSafeAndLocalDailyBound(t *testing.T) {
 	a.observeCredits("secret", http.Header{"Api-Credits-Left": {"1"}, "Api-Credits-Used": {"7"}})
 	k := sha256.Sum256([]byte("secret"))
 	u := a.usage[k]
-	require.Equal(t, 1, u.Remaining)
+	require.Equal(t, 1, u.ObservedLeft)
 	require.Equal(t, 8, u.ObservedLimit)
 	require.False(t, u.ObservedAt.IsZero())
 	for _, bad := range []string{"", "-1", "NaN", "999999999999999999999999"} {
 		a.observeCredits("secret", http.Header{"Api-Credits-Left": {bad}})
 		require.Equal(t, u, a.usage[k])
 	}
-	u.LocalQuoteCredits = 699
-	u.Remaining = 8
+	u.LocalCredits = 500
 	a.usage[k] = u
 	require.False(t, a.reserveCredits("secret", 5, true))
-	// Ten symbols at five minutes is 780 credits, so congested watchlists use six minutes (~650).
-	require.Equal(t, 780, 10*int((390*time.Minute)/marketOpenFreshTTL))
-	require.Equal(t, 650, 10*int((390*time.Minute)/(6*time.Minute)))
-	require.Less(t, 650, 800)
+	// Two eight-symbol displays use at most 416 quote credits over 6.5 open hours.
+	require.Equal(t, 416, 2*8*int((390*time.Minute)/marketOpenFreshTTL))
+	require.Less(t, 416, 500)
+}
+
+func TestMarketSearchAndCredentialValidationReserveProviderCredits(t *testing.T) {
+	var paths []string
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/symbol_search":
+			return jsonResponse(200, map[string]any{"status": "ok", "data": []any{}}), nil
+		case "/time_series":
+			return jsonResponse(200, map[string]any{"meta": map[string]any{"symbol": "AAPL"}, "values": []any{map[string]any{"close": "1.00"}}}), nil
+		default:
+			t.Fatalf("unexpected provider endpoint %s", r.URL.Path)
+			return nil, nil
+		}
+	})
+	a := NewTwelveDataAdapter(fakeResolver{secret: "shared-key"}, &http.Client{Transport: transport})
+	_, err := a.Search(t.Context(), MarketSearchRequest{Query: "Apple", CredentialID: "cred-a", ScopeType: "server_owner", ScopeID: "owner-a"})
+	require.NoError(t, err)
+	require.NoError(t, a.ValidateCredential(t.Context(), "cred-b", "server_owner", "owner-b"))
+	require.Equal(t, []string{"/symbol_search", "/time_series"}, paths)
+	u := a.usage[sha256.Sum256([]byte("shared-key"))]
+	require.Equal(t, 2, u.LocalCredits, "search and validation each cost one provider credit")
+	require.Equal(t, 2, u.MinuteUsed)
+
+	blockedCalls := 0
+	b := NewTwelveDataAdapter(fakeResolver{secret: "shared-key"}, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { blockedCalls++; return nil, nil })})
+	require.True(t, b.reserveCredits("shared-key", 6, false))
+	err = b.ValidateCredential(t.Context(), "cred-b", "server_owner", "owner-b")
+	var sanitized SanitizedError
+	require.ErrorAs(t, err, &sanitized)
+	require.Equal(t, "provider_rate_limited", sanitized.Code)
+	require.Zero(t, blockedCalls, "the request must be stopped before Twelve Data")
+}
+
+type duplicateKeyResolver struct{}
+
+func (duplicateKeyResolver) Resolve(context.Context, string, string, string) (string, error) {
+	return "same-underlying-key", nil
+}
+
+func TestMarketDuplicateCredentialRecordsShareUnderlyingMinuteBudget(t *testing.T) {
+	var calls atomic.Int32
+	a := NewTwelveDataAdapter(duplicateKeyResolver{}, &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		batch := map[string]any{}
+		for _, symbol := range strings.Split(r.URL.Query().Get("symbol"), ",") {
+			batch[symbol] = quotaFixture(symbol, true)
+		}
+		return jsonResponse(200, batch), nil
+	})})
+	first := quotaRequest("AAPL", "MSFT", "NVDA", "GOOG", "AMZN")
+	first.CredentialID, first.ScopeID = "credential-record-one", "ben-frame-owner"
+	quotes, err := a.Quotes(t.Context(), first)
+	require.NoError(t, err)
+	require.Len(t, quotes, 5)
+	second := quotaRequest("SHOP", "PLZ.UN")
+	second.CredentialID, second.ScopeID = "credential-record-two", "carter-frame-owner"
+	quotes, err = a.Quotes(t.Context(), second)
+	require.NoError(t, err)
+	require.Len(t, quotes, 2)
+	for _, quote := range quotes {
+		require.Equal(t, "provider_rate_limited", quote.ErrorCode)
+	}
+	require.EqualValues(t, 1, calls.Load(), "two records with the same secret share six credits/minute")
+}
+
+func TestMarketProductionQuotaLedgerFailureFailsClosed(t *testing.T) {
+	calls := atomic.Int32{}
+	a := NewTwelveDataAdapter(fakeResolver{secret: "shared-key"}, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("provider transport must not be reached")
+	})})
+	a.SetQuotaProtection(nil, DefaultMarketQuotaPolicy())
+	require.False(t, a.reserveCredits("shared-key", 1, false))
+	_, _, err := a.CredentialQuotaDiagnostics(t.Context(), "primary", "server_owner", "owner")
+	require.Error(t, err)
+	require.Zero(t, calls.Load())
 }
 func TestMarketQuotaClosingSnapshotReusedThroughWeekend(t *testing.T) {
 	loc, err := time.LoadLocation("America/New_York")
@@ -351,13 +432,9 @@ func TestMarketApprovedLogosTransparencyAndNoProviderCalls(t *testing.T) {
 func TestMarketQuotaReservationsPreventMinuteBoundaryBurst(t *testing.T) {
 	a, _ := quotaAdapter(t, true)
 	require.True(t, a.reserveCredits("secret", 5, true))
-	k := sha256.Sum256([]byte("secret"))
-	u := a.usage[k]
-	// Even after the provider observation window resets, recent local calls count.
-	u.MinuteUntil = time.Now().Add(-time.Second)
-	a.usage[k] = u
-	require.False(t, a.reserveCredits("secret", 5, true))
-	require.True(t, a.reserveCredits("secret", 3, false))
+	// Every endpoint weight shares the same fixed UTC minute bucket.
+	require.False(t, a.reserveCredits("secret", 2, false))
+	require.True(t, a.reserveCredits("secret", 1, false))
 	require.False(t, a.reserveCredits("secret", 1, false))
 }
 func TestMarketQuotaFiveCanonicalListingsUseOneBatch(t *testing.T) {
@@ -373,7 +450,7 @@ func TestMarketQuotaFiveCanonicalListingsUseOneBatch(t *testing.T) {
 	require.EqualValues(t, 5, a.Diagnostics().EstimatedQuoteCredits)
 }
 
-func TestMarketQuotaNoRefreshBeforeFiveMinutes(t *testing.T) {
+func TestMarketQuotaNoRefreshBeforeFifteenMinutes(t *testing.T) {
 	a, calls := quotaAdapter(t, true)
 	r := quotaRequest("AAPL")
 	_, err := a.Quotes(t.Context(), r)
@@ -381,10 +458,10 @@ func TestMarketQuotaNoRefreshBeforeFiveMinutes(t *testing.T) {
 	k := "server_owner:owner:primary:AAPL"
 	a.Cache.mu.Lock()
 	e := a.Cache.entries[k]
-	// Simulate 4:59 elapsed, leaving one second of the actual five-minute policy.
-	e.freshUntil = e.freshUntil.Add(-179 * time.Second)
+	// Simulate 14:59 elapsed, leaving one second of the open-market policy.
+	e.freshUntil = time.Now().Add(time.Second)
 	a.Cache.entries[k] = e
-	a.Cache.lastRun[k] = time.Now().Add(-179 * time.Second)
+	a.Cache.lastRun[k] = time.Now().Add(-14*time.Minute - 59*time.Second)
 	a.Cache.mu.Unlock()
 	_, err = a.Quotes(t.Context(), r)
 	require.NoError(t, err)
@@ -428,18 +505,18 @@ func TestMarketRemoteLogoCacheIndependentOfQuoteRefresh(t *testing.T) {
 	require.Equal(t, 1, images)
 }
 
-func TestMarketTenSymbolsStaggeredFiveCreditGroups(t *testing.T) {
+func TestMarketEightSymbolsStaggeredWithinSixCreditMinuteBudget(t *testing.T) {
 	a, calls := quotaAdapter(t, true)
-	r := quotaRequest("AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "AMD", "INTC", "IBM", "ORCL")
+	r := quotaRequest("AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "AMD", "INTC")
 	q, err := a.Quotes(t.Context(), r)
 	require.NoError(t, err)
-	require.Len(t, q, 10)
+	require.Len(t, q, 8)
 	require.EqualValues(t, 1, calls.Load())
 	require.EqualValues(t, 5, a.Diagnostics().EstimatedQuoteCredits)
 	for i := 0; i < 5; i++ {
 		require.Empty(t, q[i].ErrorCode)
 	}
-	for i := 5; i < 10; i++ {
+	for i := 5; i < 8; i++ {
 		require.Equal(t, "provider_rate_limited", q[i].ErrorCode)
 	}
 	for range 10 {
@@ -450,8 +527,7 @@ func TestMarketTenSymbolsStaggeredFiveCreditGroups(t *testing.T) {
 	a.usageMu.Lock()
 	k := sha256.Sum256([]byte("secret"))
 	u := a.usage[k]
-	u.MinuteUntil = time.Now().Add(-time.Second)
-	u.Reservations = nil
+	u.MinuteBucket = 0
 	a.usage[k] = u
 	a.usageMu.Unlock()
 	a.failureMu.Lock()
@@ -466,10 +542,47 @@ func TestMarketTenSymbolsStaggeredFiveCreditGroups(t *testing.T) {
 	for _, quote := range q {
 		require.Empty(t, quote.ErrorCode)
 	}
-	require.EqualValues(t, 10, a.Diagnostics().EstimatedQuoteCredits)
+	require.EqualValues(t, 8, a.Diagnostics().EstimatedQuoteCredits)
 	for _, e := range a.Cache.entries {
-		require.WithinDuration(t, time.Now().Add(6*time.Minute), e.freshUntil, time.Second)
+		require.WithinDuration(t, time.Now().Add(15*time.Minute), e.freshUntil, time.Second)
 	}
+}
+
+func TestMarketEightSymbolQuotaDeferralKeepsLastKnownGoodVisible(t *testing.T) {
+	a, calls := quotaAdapter(t, true)
+	symbols := []string{"AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "AMD", "INTC"}
+	request := quotaRequest(symbols...)
+	now := time.Now()
+	a.Cache.mu.Lock()
+	for _, symbol := range symbols {
+		key := "server_owner:owner:primary:" + symbol
+		quote := MarketQuote{Symbol: symbol, Price: 100, Currency: "USD", MarketStatus: MarketOpen, QuoteTimestamp: now.Add(-time.Minute)}
+		a.Cache.entries[key] = cacheEntry[[]MarketQuote]{value: []MarketQuote{quote}, freshUntil: now.Add(-time.Second), staleUntil: now.Add(72 * time.Hour)}
+	}
+	a.Cache.mu.Unlock()
+	// Simulate one already-reserved credit. The first five-name batch now fits
+	// exactly; the last three are deferred until the following UTC minute.
+	require.True(t, a.reserveCredits("secret", 1, true))
+	quotes, err := a.Quotes(t.Context(), request)
+	require.NoError(t, err)
+	require.Len(t, quotes, 8)
+	for i := 0; i < 5; i++ {
+		require.Empty(t, quotes[i].ErrorCode)
+		require.False(t, quotes[i].Stale)
+	}
+	for i := 5; i < 8; i++ {
+		require.Empty(t, quotes[i].ErrorCode, "quota deferral must serve cached data rather than a false PLAN/invalid-symbol error")
+		require.True(t, quotes[i].Stale)
+		require.Equal(t, 100.0, quotes[i].Price)
+	}
+	firstCallCount := calls.Load()
+	for range 10 {
+		quotes, err = a.Quotes(t.Context(), request)
+		require.NoError(t, err)
+		require.True(t, quotes[7].Stale)
+	}
+	require.Equal(t, firstCallCount, calls.Load(), "polling must not defeat the one-minute defer")
+	require.EqualValues(t, 6, a.Diagnostics().EstimatedQuoteCredits)
 }
 
 type householdMarketResolver struct{}
@@ -562,6 +675,33 @@ func TestMarketCuratedLogosWinOverOldRemoteCache(t *testing.T) {
 	require.Zero(t, calls.Load())
 }
 
+func TestPlazaLogoRemainsVisibleForTwelveDataPlanError(t *testing.T) {
+	adapter := NewTwelveDataAdapter(nil, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("curated logo for an entitlement error must not call the provider")
+		return nil, nil
+	})})
+	request := quotaRequest()
+	request.Listings = []MarketListing{{Symbol: "PLZ.UN", Exchange: "TSX", MIC: "XTSE", Currency: "CAD"}}
+	listing, err := request.Listings[0].Normalize()
+	require.NoError(t, err)
+	assert.Equal(t, "twelvedata:PLZ.UN:XTSE", listing.ID)
+	normal := adapter.HydrateQuotes(t.Context(), request, []MarketQuote{{Symbol: "PLZ.UN", Exchange: "TSX", MIC: "XTSE", Currency: "CAD"}})
+	require.Len(t, normal, 1)
+	assert.NotEmpty(t, normal[0].LogoData, "normal Twelve Data quotes use the canonical curated logo")
+	quotes := []MarketQuote{{Symbol: "PLZ.UN", ErrorCode: "provider_entitlement_required"}}
+	hydrated := adapter.HydrateQuotes(t.Context(), request, quotes)
+	require.Len(t, hydrated, 1)
+	assert.Equal(t, "provider_entitlement_required", hydrated[0].ErrorCode)
+	assert.NotEmpty(t, hydrated[0].LogoData)
+	assert.Equal(t, MarketLogoRevision(), hydrated[0].LogoVersion)
+	assert.Empty(t, quotes[0].LogoData, "hydration returns a copy")
+	data, err := base64.StdEncoding.DecodeString(hydrated[0].LogoData)
+	require.NoError(t, err)
+	logo, err := png.Decode(bytes.NewReader(data))
+	require.NoError(t, err)
+	assert.Equal(t, image.Rect(0, 0, 20, 20), logo.Bounds())
+}
+
 func TestMarketLogoFingerprintAndCachedQuoteRevisionIndependentOfProvider(t *testing.T) {
 	require.NotEqual(t, marketLogoFingerprint("v1", []byte("asset-a")), marketLogoFingerprint("v2", []byte("asset-a")))
 	require.NotEqual(t, marketLogoFingerprint("v1", []byte("asset-a")), marketLogoFingerprint("v1", []byte("asset-b")))
@@ -585,7 +725,7 @@ func TestMarketLogoFingerprintAndCachedQuoteRevisionIndependentOfProvider(t *tes
 	require.EqualValues(t, 1, calls.Load())
 }
 
-func TestMarketTwoTenStockDevicesHaveIndependentBudgets(t *testing.T) {
+func TestMarketTwoEightStockDevicesHaveSeparateUnderlyingKeys(t *testing.T) {
 	counts := map[string]int{}
 	a := NewTwelveDataAdapter(householdMarketResolver{}, &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		counts[r.Header.Get("Authorization")]++
@@ -595,19 +735,18 @@ func TestMarketTwoTenStockDevicesHaveIndependentBudgets(t *testing.T) {
 		}
 		return jsonResponse(200, batch), nil
 	})})
-	r := quotaRequest("AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "AMD", "INTC", "IBM", "ORCL")
+	r := quotaRequest("AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "AMD", "INTC")
 	for _, id := range []string{"a", "b"} {
 		r.CredentialID = id
 		q, err := a.Quotes(t.Context(), r)
 		require.NoError(t, err)
-		require.Len(t, q, 10)
+		require.Len(t, q, 8)
 		require.Equal(t, 1, counts["apikey offline-"+id])
 	}
 	require.EqualValues(t, 10, a.Diagnostics().EstimatedQuoteCredits)
 	a.usageMu.Lock()
 	for k, u := range a.usage {
-		u.Reservations = nil
-		u.MinuteUntil = time.Now().Add(-time.Second)
+		u.MinuteBucket = 0
 		a.usage[k] = u
 	}
 	a.usageMu.Unlock()
@@ -626,5 +765,5 @@ func TestMarketTwoTenStockDevicesHaveIndependentBudgets(t *testing.T) {
 		}
 		require.Equal(t, 2, counts["apikey offline-"+id])
 	}
-	require.EqualValues(t, 20, a.Diagnostics().EstimatedQuoteCredits)
+	require.EqualValues(t, 16, a.Diagnostics().EstimatedQuoteCredits)
 }

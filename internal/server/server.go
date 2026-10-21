@@ -23,6 +23,7 @@ import (
 	"tronbyt-server/internal/apps"
 	"tronbyt-server/internal/config"
 	"tronbyt-server/internal/credentials"
+	"tronbyt-server/internal/data"
 	"tronbyt-server/internal/gitutils"
 	"tronbyt-server/internal/providers"
 	"tronbyt-server/internal/provisioning"
@@ -148,7 +149,18 @@ func NewServer(db *gorm.DB, cfg *config.Settings) *Server {
 			slog.Error("Provider credential store disabled", "reason", "invalid_master_key")
 		} else {
 			s.CredentialStore = store
-			s.MarketProvider = providers.NewTwelveDataAdapter(store, nil)
+			market := providers.NewTwelveDataAdapter(store, nil)
+			policy := marketQuotaPolicyFromConfig(cfg)
+			var quotaStore providers.MarketQuotaStore
+			if db != nil && db.Migrator().HasTable(&data.MarketQuotaLedger{}) && db.Migrator().HasTable(&data.MarketQuotaSymbol{}) {
+				quotaStore = data.MarketQuotaStore{DB: db}
+			}
+			market.SetQuotaProtection(quotaStore, policy)
+			s.MarketProvider = market
+			if cfg.YahooFinanceExperimentEnabled() {
+				s.MarketProvider = providers.NewLocalYahooMarketRouter(market, providers.NewYahooFinanceAdapter(nil))
+				slog.Warn("Experimental Yahoo Finance quote routing enabled for local development")
+			}
 			s.WeatherProvider = providers.NewOpenWeatherAdapter(store, nil)
 		}
 	}

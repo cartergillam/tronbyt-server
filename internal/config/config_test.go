@@ -25,3 +25,23 @@ func TestLoadSettings(t *testing.T) {
 		t.Fatalf("unexpected apps source: ref=%q expected=%q", cfg.SystemAppsRef, cfg.SystemAppsExpectedSHA)
 	}
 }
+
+func TestYahooFinanceExperimentRequiresExplicitLocalFlags(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cfg  Settings
+		want bool
+	}{
+		{"defaults stay off", Settings{Production: true}, false},
+		{"production cannot enable it", Settings{Production: true, LocalDevelopment: true, ExperimentalYahooFinance: true}, false},
+		{"missing local marker", Settings{Production: false, ExperimentalYahooFinance: true}, false},
+		{"missing explicit opt in", Settings{Production: false, LocalDevelopment: true}, false},
+		{"explicit local opt in", Settings{Production: false, LocalDevelopment: true, ExperimentalYahooFinance: true}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.cfg.YahooFinanceExperimentEnabled(); got != test.want {
+				t.Fatalf("YahooFinanceExperimentEnabled() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}

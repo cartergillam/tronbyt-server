@@ -18,6 +18,7 @@ import (
 	"tronbyt-server/internal/data"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
 
@@ -118,6 +119,28 @@ func TestHandleConfigAppPost(t *testing.T) {
 	if val, ok := updatedApp.Config["key"].(string); !ok || val != "val" {
 		t.Errorf("App config not updated")
 	}
+}
+
+func TestHandleConfigAppPostRejectsNinthMarketSymbol(t *testing.T) {
+	s := newTestServer(t)
+	user := data.User{Username: "testuser"}
+	device := data.Device{ID: "testdevice", Username: "testuser"}
+	app := data.App{DeviceID: device.ID, Iname: "103", Name: "market-watch", Enabled: true, Config: data.JSONMap{"symbols": "AAPL"}}
+	require.NoError(t, s.DB.Create(&user).Error)
+	require.NoError(t, s.DB.Create(&device).Error)
+	require.NoError(t, s.DB.Create(&app).Error)
+	payload := `{"config":{"watchlist":"[{\"symbol\":\"AAPL\"},{\"symbol\":\"MSFT\"},{\"symbol\":\"NVDA\"},{\"symbol\":\"SHOP\"},{\"symbol\":\"PLZ.UN\"},{\"symbol\":\"GOOG\"},{\"symbol\":\"AMZN\"},{\"symbol\":\"META\"},{\"symbol\":\"BRK.B\"}]"}}`
+	req := httptest.NewRequest(http.MethodPost, "/devices/testdevice/103/config", strings.NewReader(payload))
+	ctx := context.WithValue(req.Context(), userContextKey, &user)
+	ctx = context.WithValue(ctx, deviceContextKey, &device)
+	ctx = context.WithValue(ctx, appContextKey, &app)
+	rec := httptest.NewRecorder()
+	http.HandlerFunc(s.handleConfigAppPost).ServeHTTP(rec, req.WithContext(ctx))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "1 and 8")
+	var saved data.App
+	require.NoError(t, s.DB.First(&saved, "id = ?", app.ID).Error)
+	assert.Equal(t, "AAPL", saved.Config["symbols"])
 }
 
 func TestHandleConfigAppPost_TimeFormat(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
@@ -71,15 +72,22 @@ func (listing MarketListing) Normalize() (MarketListing, error) {
 // ParseMarketWatchlist uses an additive JSON string field so existing Pixlet
 // schemas, saved symbol strings and older config clients remain compatible.
 func ParseMarketWatchlist(raw string) ([]MarketListing, error) {
+	return ParseMarketWatchlistLimit(raw, MaxMarketSymbols)
+}
+
+func ParseMarketWatchlistLimit(raw string, maxSymbols int) ([]MarketListing, error) {
 	if len(raw) > 8192 {
 		return nil, errors.New("watchlist is too large")
+	}
+	if maxSymbols < 1 || maxSymbols > MaxMarketSymbols {
+		maxSymbols = MaxMarketSymbols
 	}
 	var listings []MarketListing
 	if err := json.Unmarshal([]byte(raw), &listings); err != nil {
 		return nil, errors.New("watchlist must contain listings")
 	}
-	if len(listings) < 1 || len(listings) > MaxMarketSymbols {
-		return nil, errors.New("choose between 1 and 10 stocks")
+	if len(listings) < 1 || len(listings) > maxSymbols {
+		return nil, fmt.Errorf("Choose between 1 and %d stocks to protect shared market-data limits", maxSymbols)
 	}
 	seen := map[string]bool{}
 	for i, listing := range listings {

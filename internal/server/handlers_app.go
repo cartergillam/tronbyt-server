@@ -24,6 +24,7 @@ import (
 	"tronbyt-server/internal/config"
 	"tronbyt-server/internal/data"
 	"tronbyt-server/internal/gitutils"
+	"tronbyt-server/internal/providers"
 	"tronbyt-server/internal/renderer"
 
 	securejoin "github.com/cyphar/filepath-securejoin"
@@ -456,6 +457,23 @@ func (s *Server) handleConfigAppPost(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
+	}
+	if app.Name == "market-watch" {
+		maxSymbols := s.marketMaxSymbols()
+		if raw, ok := payload.Config["watchlist"].(string); ok && strings.TrimSpace(raw) != "" {
+			listings, err := providers.ParseMarketWatchlistLimit(raw, maxSymbols)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			encoded, _ := json.Marshal(listings)
+			payload.Config["watchlist"] = string(encoded)
+		} else if raw, ok := payload.Config["symbols"].(string); ok && strings.TrimSpace(raw) != "" {
+			if err := (providers.MarketRequest{Symbols: providerSymbols(raw), MaxSymbols: maxSymbols}).Validate(); err != nil {
+				http.Error(w, "Choose between 1 and "+strconv.Itoa(maxSymbols)+" stocks to protect shared market-data limits", http.StatusBadRequest)
+				return
+			}
+		}
 	}
 
 	// Update App
