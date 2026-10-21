@@ -16,7 +16,7 @@ import (
 
 const marketSearchTTL = 24 * time.Hour
 
-// Counters contain no listing, user, credential, or request URL information.
+// MarketDiagnostics contains no listing, user, credential, or request URL information.
 type MarketDiagnostics struct {
 	ProviderRequests, SymbolsRefreshed, EstimatedQuoteCredits, CacheHits, CacheMisses, QuotaDefers uint64
 	LastBatchSize                                                                                  int
@@ -194,7 +194,7 @@ func (a *TwelveDataAdapter) quoteBody(ctx context.Context, query url.Values, sec
 	if err != nil {
 		return nil, 0, SanitizedError{Code: "provider_network_error", Message: "Market data is temporarily unavailable", Retryable: true}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	a.observeCredits(secret, resp.Header)
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024+1))
 	if err != nil || len(body) > 512*1024 {
@@ -388,8 +388,7 @@ func (a *TwelveDataAdapter) listingQuotes(ctx context.Context, r MarketRequest) 
 				firstErr = err
 			}
 			code := "provider_unavailable"
-			var classified SanitizedError
-			if errors.As(err, &classified) {
+			if classified, ok := errors.AsType[SanitizedError](err); ok {
 				code = classified.Code
 				if code == "provider_network_error" {
 					// Keep the existing renderer-facing error contract; the richer
@@ -487,14 +486,12 @@ func (a *TwelveDataAdapter) QuoteDiagnostics(ctx context.Context, request Market
 	now := time.Now()
 	result := make([]MarketQuoteDiagnostic, 0, len(inputs))
 	for _, input := range inputs {
-		state := marketQuoteState{}
 		a.quoteStateMu.Lock()
-		state = a.quoteState[input.key]
+		state := a.quoteState[input.key]
 		a.quoteStateMu.Unlock()
 
-		entry, found := cacheEntry[[]MarketQuote]{}, false
 		a.Cache.mu.Lock()
-		entry, found = a.Cache.entries[input.key]
+		entry, found := a.Cache.entries[input.key]
 		a.Cache.mu.Unlock()
 		stale := found && now.After(entry.freshUntil) && now.Before(entry.staleUntil)
 
@@ -528,7 +525,7 @@ func (a *TwelveDataAdapter) QuoteDiagnostics(ctx context.Context, request Market
 // legacy resolvers retain their existing owner + credential identity.
 func (a *TwelveDataAdapter) credentialCacheScope(ctx context.Context, id, scopeType, scopeID string) (string, error) {
 	if resolver, ok := a.Credentials.(interface {
-		CredentialCacheScope(context.Context, string, string, string) (string, error)
+		CredentialCacheScope(ctx context.Context, id, scopeType, scopeID string) (string, error)
 	}); ok {
 		return resolver.CredentialCacheScope(ctx, id, scopeType, scopeID)
 	}

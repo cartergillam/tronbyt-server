@@ -31,7 +31,7 @@ var approvedMarketLogos = map[string]string{
 
 const marketLogoNormalizationVersion = "market-logo-v3"
 
-// Includes all embedded assets: any curated edit invalidates only Market Watch
+// MarketLogoRevision includes all embedded assets: any curated edit invalidates only Market Watch
 // logos and render output, never quote snapshots or unrelated app caches.
 func MarketLogoRevision() string {
 	bodies := [][]byte{}
@@ -54,8 +54,8 @@ func approvedMarketLogoName(listing MarketListing) string {
 	id := listing.ID
 	// NASDAQ's market segments are distinct listing IDs but share these marks.
 	for _, mic := range []string{"XNGS", "XNMS", "XNCM"} {
-		if strings.HasSuffix(id, ":"+mic) {
-			id = strings.TrimSuffix(id, ":"+mic) + ":XNAS"
+		if canonical, found := strings.CutSuffix(id, ":"+mic); found {
+			id = canonical + ":XNAS"
 		}
 	}
 	name := approvedMarketLogos[id]
@@ -121,7 +121,7 @@ func (adapter *TwelveDataAdapter) marketJSON(ctx context.Context, path string, q
 		return TemporarilyUnavailable()
 	}
 	adapter.observeCredits(secret, response.Header)
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 512*1024+1))
 	if err != nil || len(body) > 512*1024 {
 		return TemporarilyUnavailable()

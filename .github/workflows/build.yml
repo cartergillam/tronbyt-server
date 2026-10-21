@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   lint:
@@ -39,7 +40,8 @@ jobs:
       - name: Lint Go
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version-file: .golangci-lint-version
+          only-new-issues: true
           args: --timeout=5m
 
       - name: Setup Python for djLint

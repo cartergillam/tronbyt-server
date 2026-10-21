@@ -312,7 +312,7 @@ func TestMarketDuplicateCredentialRecordsShareUnderlyingMinuteBudget(t *testing.
 	a := NewTwelveDataAdapter(duplicateKeyResolver{}, &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		batch := map[string]any{}
-		for _, symbol := range strings.Split(r.URL.Query().Get("symbol"), ",") {
+		for symbol := range strings.SplitSeq(r.URL.Query().Get("symbol"), ",") {
 			batch[symbol] = quotaFixture(symbol, true)
 		}
 		return jsonResponse(200, batch), nil
@@ -393,8 +393,8 @@ func TestMarketApprovedLogosTransparencyAndNoProviderCalls(t *testing.T) {
 		_, _, _, alpha := img.At(0, 0).RGBA()
 		require.Zero(t, alpha)
 		colors := map[[3]uint32]bool{}
-		for y := 0; y < 20; y++ {
-			for x := 0; x < 20; x++ {
+		for y := range 20 {
+			for x := range 20 {
 				r, g, b, a := img.At(x, y).RGBA()
 				if a == 65535 {
 					colors[[3]uint32{r, g, b}] = true
@@ -513,7 +513,7 @@ func TestMarketEightSymbolsStaggeredWithinSixCreditMinuteBudget(t *testing.T) {
 	require.Len(t, q, 8)
 	require.EqualValues(t, 1, calls.Load())
 	require.EqualValues(t, 5, a.Diagnostics().EstimatedQuoteCredits)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		require.Empty(t, q[i].ErrorCode)
 	}
 	for i := 5; i < 8; i++ {
@@ -730,7 +730,7 @@ func TestMarketTwoEightStockDevicesHaveSeparateUnderlyingKeys(t *testing.T) {
 	a := NewTwelveDataAdapter(householdMarketResolver{}, &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		counts[r.Header.Get("Authorization")]++
 		batch := map[string]any{}
-		for _, s := range strings.Split(r.URL.Query().Get("symbol"), ",") {
+		for s := range strings.SplitSeq(r.URL.Query().Get("symbol"), ",") {
 			batch[s] = quotaFixture(s, true)
 		}
 		return jsonResponse(200, batch), nil

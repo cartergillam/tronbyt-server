@@ -34,7 +34,7 @@ func TestMarketWatchlistLimitReturnsFriendlyEightSymbolError(t *testing.T) {
 	require.NoError(t, err)
 	_, err = ParseMarketWatchlistLimit(string(raw), 8)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Choose between 1 and 8 stocks")
+	assert.Contains(t, err.Error(), "choose between 1 and 8 stocks")
 }
 
 func TestSportsSnapshotJSONUsesEmptyArraysForAbsentCollections(t *testing.T) {

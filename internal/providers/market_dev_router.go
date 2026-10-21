@@ -94,8 +94,8 @@ func (r *LocalYahooMarketRouter) Quotes(ctx context.Context, request MarketReque
 }
 
 func yahooErrorCode(err error) string {
-	var classified SanitizedError
-	if errors.As(err, &classified) {
+	classified, ok := errors.AsType[SanitizedError](err)
+	if ok {
 		return classified.Code
 	}
 	return "provider_error"
@@ -128,10 +128,7 @@ func (r *LocalYahooMarketRouter) QuoteDiagnostics(ctx context.Context, request M
 		}
 		return result, nil
 	}
-	var td []string
-	for _, symbol := range request.Symbols {
-		td = append(td, symbol)
-	}
+	td := append([]string(nil), request.Symbols...)
 	if len(td) > 0 {
 		rows, err := r.TwelveData.QuoteDiagnostics(ctx, MarketRequest{Symbols: td, CredentialID: request.CredentialID, ScopeType: request.ScopeType, ScopeID: request.ScopeID})
 		if err != nil {

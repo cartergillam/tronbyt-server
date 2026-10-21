@@ -133,7 +133,7 @@ func (a *YahooFinanceAdapter) requestQuote(ctx context.Context) (MarketQuote, er
 	if err != nil {
 		return MarketQuote{}, SanitizedError{Code: "provider_network_error", Message: "Market data is temporarily unavailable", Retryable: true}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024+1))
 	if err != nil || len(body) > 512*1024 {
 		return MarketQuote{}, SanitizedError{Code: "provider_response_invalid", Message: "Market data could not be read", Retryable: true}
@@ -179,7 +179,7 @@ func DecodeYahooFinanceChart(body []byte) (MarketQuote, error) {
 	meta := item.Meta
 	exchange := strings.ToUpper(strings.TrimSpace(meta.ExchangeName))
 	if !strings.EqualFold(meta.Symbol, yahooSymbol) || !strings.EqualFold(meta.Currency, "CAD") || (exchange != "TOR" && exchange != "TORONTO") {
-		return MarketQuote{}, fmt.Errorf("Yahoo listing identity mismatch")
+		return MarketQuote{}, fmt.Errorf("yahoo listing identity mismatch")
 	}
 	previous := meta.ChartPreviousClose
 	if previous == 0 {
@@ -187,11 +187,11 @@ func DecodeYahooFinanceChart(body []byte) (MarketQuote, error) {
 	}
 	price := meta.RegularMarketPrice
 	if !finitePositive(price) || !finitePositive(previous) || meta.RegularMarketTime <= 0 {
-		return MarketQuote{}, fmt.Errorf("Yahoo quote fields are invalid")
+		return MarketQuote{}, fmt.Errorf("yahoo quote fields are invalid")
 	}
 	updated := time.Unix(meta.RegularMarketTime, 0).UTC()
 	if updated.After(time.Now().Add(24 * time.Hour)) {
-		return MarketQuote{}, fmt.Errorf("Yahoo quote timestamp is invalid")
+		return MarketQuote{}, fmt.Errorf("yahoo quote timestamp is invalid")
 	}
 	change := price - previous
 	return MarketQuote{

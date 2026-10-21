@@ -54,18 +54,18 @@ type MarketQuotaSnapshot struct {
 	NewSymbolsToday        int       `json:"newSymbolsToday"`
 	BlockedRequests        uint64    `json:"blockedRequests"`
 	ObservedCreditsLeft    int       `json:"providerCreditsLeft,omitempty"`
-	ObservedAt             time.Time `json:"providerCreditsObservedAt,omitempty"`
-	NextEligibleAt         time.Time `json:"nextEligibleAt,omitempty"`
+	ObservedAt             time.Time `json:"providerCreditsObservedAt,omitzero"`
+	NextEligibleAt         time.Time `json:"nextEligibleAt,omitzero"`
 }
 
 // MarketQuotaStore coordinates reservations across server instances and
 // survives restarts. keyHash is SHA-256 of the underlying provider key.
 type MarketQuotaStore interface {
-	ReserveMarketCredits(context.Context, string, int, []string, MarketQuotaPolicy, time.Time) (MarketQuotaSnapshot, bool, error)
-	ObserveMarketCredits(context.Context, string, int, int, time.Time) error
-	ReadMarketQuota(context.Context, string, MarketQuotaPolicy, time.Time) (MarketQuotaSnapshot, error)
+	ReserveMarketCredits(ctx context.Context, keyHash string, cost int, symbols []string, policy MarketQuotaPolicy, now time.Time) (MarketQuotaSnapshot, bool, error)
+	ObserveMarketCredits(ctx context.Context, keyHash string, used, left int, at time.Time) error
+	ReadMarketQuota(ctx context.Context, keyHash string, policy MarketQuotaPolicy, now time.Time) (MarketQuotaSnapshot, error)
 }
 
 type MarketQuotaDiagnosticProvider interface {
-	CredentialQuotaDiagnostics(context.Context, string, string, string) (MarketQuotaSnapshot, MarketQuotaPolicy, error)
+	CredentialQuotaDiagnostics(ctx context.Context, credentialID, scopeType, scopeID string) (MarketQuotaSnapshot, MarketQuotaPolicy, error)
 }

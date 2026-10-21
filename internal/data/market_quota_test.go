@@ -33,9 +33,7 @@ func TestMarketQuotaConcurrentReservationsAreAtomic(t *testing.T) {
 	var mu sync.Mutex
 	allowed := 0
 	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, ok, err := store.ReserveMarketCredits(t.Context(), "a9c7288b324892b0-keyhash", 1, nil, policy, now)
 			require.NoError(t, err)
 			if ok {
@@ -43,7 +41,7 @@ func TestMarketQuotaConcurrentReservationsAreAtomic(t *testing.T) {
 				allowed++
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	require.Equal(t, 6, allowed)
@@ -79,7 +77,7 @@ func TestMarketQuotaWeightsChurnRestartAndUTCReset(t *testing.T) {
 	require.False(t, ok)
 
 	// Churn is unique symbols per key/day, independent of watchlist add/remove cycles.
-	for i := 0; i < 11; i++ {
+	for i := range 11 {
 		minute := now.Add(time.Duration(i+1) * time.Minute)
 		_, ok, err = store.ReserveMarketCredits(t.Context(), keyHash, 1, []string{fmt.Sprintf("S%02d", i)}, policy, minute)
 		require.NoError(t, err)
@@ -166,7 +164,7 @@ func TestMarketQuotaDailyLimitAndResetAreUTC(t *testing.T) {
 	policy := providers.DefaultMarketQuotaPolicy()
 	key := "daily-cap-hash"
 	start := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
-	for i := 0; i < 83; i++ {
+	for i := range 83 {
 		_, allowed, err := store.ReserveMarketCredits(t.Context(), key, 6, nil, policy, start.Add(time.Duration(i)*time.Minute))
 		require.NoError(t, err)
 		require.True(t, allowed)

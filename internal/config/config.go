@@ -10,39 +10,39 @@ import (
 )
 
 type Settings struct {
-	DBDSN                       string `env:"DB_DSN"                   envDefault:"data/tronbyt.db"`
-	DataDir                     string `env:"DATA_DIR"                 envDefault:"data"`
-	Production                  bool   `env:"PRODUCTION"               envDefault:"true"`
+	DBDSN                       string `env:"DB_DSN"                             envDefault:"data/tronbyt.db"`
+	DataDir                     string `env:"DATA_DIR"                           envDefault:"data"`
+	Production                  bool   `env:"PRODUCTION"                         envDefault:"true"`
 	LocalDevelopment            bool   `env:"TRONBYT_LOCAL_DEVELOPMENT"`
 	ExperimentalYahooFinance    bool   `env:"TRONBYT_EXPERIMENTAL_YAHOO_FINANCE"`
-	EnableUserRegistration      bool   `env:"ENABLE_USER_REGISTRATION" envDefault:"true"`
+	EnableUserRegistration      bool   `env:"ENABLE_USER_REGISTRATION"           envDefault:"true"`
 	EnablePprof                 bool   `env:"ENABLE_PPROF"`
 	MaxUsers                    int    `env:"MAX_USERS"`
 	SingleUserAutoLogin         bool   `env:"SINGLE_USER_AUTO_LOGIN"`
 	SystemAppsAutoRefresh       bool   `env:"SYSTEM_APPS_AUTO_REFRESH"`
-	SystemAppsRepo              string `env:"SYSTEM_APPS_REPO"         envDefault:"https://github.com/tronbyt/apps.git"`
-	SystemAppsRef               string `env:"SYSTEM_APPS_REF"          envDefault:"main"`
+	SystemAppsRepo              string `env:"SYSTEM_APPS_REPO"                   envDefault:"https://github.com/tronbyt/apps.git"`
+	SystemAppsRef               string `env:"SYSTEM_APPS_REF"                    envDefault:"main"`
 	SystemAppsExpectedSHA       string `env:"SYSTEM_APPS_EXPECTED_COMMIT"`
 	GitHubToken                 string `env:"GITHUB_TOKEN"`
 	RedisURL                    string `env:"REDIS_URL"`
-	Host                        string `env:"TRONBYT_HOST"             envDefault:""`
-	Port                        string `env:"TRONBYT_PORT"             envDefault:"8000"`
+	Host                        string `env:"TRONBYT_HOST"                       envDefault:""`
+	Port                        string `env:"TRONBYT_PORT"                       envDefault:"8000"`
 	UnixSocket                  string `env:"TRONBYT_UNIX_SOCKET"`
 	SSLKeyFile                  string `env:"TRONBYT_SSL_KEYFILE"`
 	SSLCertFile                 string `env:"TRONBYT_SSL_CERTFILE"`
 	TrustedProxies              string `env:"TRONBYT_TRUSTED_PROXIES"`
-	LogLevel                    string `env:"LOG_LEVEL"                envDefault:"INFO"`
-	LogFormat                   string `env:"LOG_FORMAT"               envDefault:"text"`
-	EnableUpdateChecks          bool   `env:"ENABLE_UPDATE_CHECKS"     envDefault:"true"`
-	AltSvcMode                  string `env:"ALT_SVC_MODE"             envDefault:"external"` // "internal" or "external"
+	LogLevel                    string `env:"LOG_LEVEL"                          envDefault:"INFO"`
+	LogFormat                   string `env:"LOG_FORMAT"                         envDefault:"text"`
+	EnableUpdateChecks          bool   `env:"ENABLE_UPDATE_CHECKS"               envDefault:"true"`
+	AltSvcMode                  string `env:"ALT_SVC_MODE"                       envDefault:"external"` // "internal" or "external"
 	ProviderCredentialMasterKey string `env:"PROVIDER_CREDENTIAL_MASTER_KEY"`
 	PairingCodeSecret           string `env:"PAIRING_CODE_SECRET"`
-	MarketMaxSymbols            int    `env:"MARKET_MAX_SYMBOLS" envDefault:"8"`
-	MarketOpenRefreshMinutes    int    `env:"MARKET_OPEN_REFRESH_MINUTES" envDefault:"15"`
-	MarketClosedRefreshMinutes  int    `env:"MARKET_CLOSED_REFRESH_MINUTES" envDefault:"60"`
-	MarketDailyCreditBudget     int    `env:"MARKET_DAILY_CREDIT_BUDGET" envDefault:"500"`
-	MarketMinuteCreditBudget    int    `env:"MARKET_MINUTE_CREDIT_BUDGET" envDefault:"6"`
-	MarketNewSymbolsDaily       int    `env:"MARKET_NEW_SYMBOLS_DAILY" envDefault:"16"`
+	MarketMaxSymbols            int    `env:"MARKET_MAX_SYMBOLS"                 envDefault:"8"`
+	MarketOpenRefreshMinutes    int    `env:"MARKET_OPEN_REFRESH_MINUTES"        envDefault:"15"`
+	MarketClosedRefreshMinutes  int    `env:"MARKET_CLOSED_REFRESH_MINUTES"      envDefault:"60"`
+	MarketDailyCreditBudget     int    `env:"MARKET_DAILY_CREDIT_BUDGET"         envDefault:"500"`
+	MarketMinuteCreditBudget    int    `env:"MARKET_MINUTE_CREDIT_BUDGET"        envDefault:"6"`
+	MarketNewSymbolsDaily       int    `env:"MARKET_NEW_SYMBOLS_DAILY"           envDefault:"16"`
 
 	// OIDC Configuration
 	OIDCEnabled         bool   `env:"OIDC_ENABLED"`

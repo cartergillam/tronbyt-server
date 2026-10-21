@@ -87,7 +87,7 @@ func ParseMarketWatchlistLimit(raw string, maxSymbols int) ([]MarketListing, err
 		return nil, errors.New("watchlist must contain listings")
 	}
 	if len(listings) < 1 || len(listings) > maxSymbols {
-		return nil, fmt.Errorf("Choose between 1 and %d stocks to protect shared market-data limits", maxSymbols)
+		return nil, fmt.Errorf("choose between 1 and %d stocks to protect shared market-data limits", maxSymbols)
 	}
 	seen := map[string]bool{}
 	for i, listing := range listings {
@@ -106,10 +106,10 @@ func ParseMarketWatchlistLimit(raw string, maxSymbols int) ([]MarketListing, err
 
 type MarketSearchRequest struct{ Query, CredentialID, ScopeType, ScopeID string }
 type MarketSearcher interface {
-	Search(context.Context, MarketSearchRequest) ([]MarketListing, error)
+	Search(ctx context.Context, request MarketSearchRequest) ([]MarketListing, error)
 }
 type MarketLogoHydrator interface {
-	HydrateQuotes(context.Context, MarketRequest, []MarketQuote) []MarketQuote
+	HydrateQuotes(ctx context.Context, request MarketRequest, quotes []MarketQuote) []MarketQuote
 }
 
 func (adapter *TwelveDataAdapter) Search(ctx context.Context, request MarketSearchRequest) ([]MarketListing, error) {
