@@ -183,9 +183,13 @@ func TestMarketQuotaOpenClosedAndUnknownFreshness(t *testing.T) {
 	require.Equal(t, 15*time.Minute, marketOpenFreshTTL)
 	require.Equal(t, time.Hour, marketClosedFreshTTL)
 	require.Equal(t, time.Hour, marketQuoteTTL(MarketQuote{MarketStatus: MarketUnknown}, time.Now()))
-	closedTTL := marketQuoteTTL(MarketQuote{MarketStatus: MarketClosed, MIC: "XNAS", QuoteTimestamp: time.Now()}, time.Now())
-	require.Greater(t, closedTTL, time.Duration(0))
-	require.LessOrEqual(t, closedTTL, time.Hour, "a known pre-open quote is refreshed at the opening bell if sooner than the closed TTL")
+	// Use a fixed pre-open time so the assertion is independent of the CI
+	// runner's timezone and time of day. At 09:00 ET, a previous-close quote
+	// should be refreshed when the market opens in 30 minutes.
+	preOpen := time.Date(2026, time.October, 21, 13, 0, 0, 0, time.UTC)
+	previousClose := time.Date(2026, time.October, 20, 20, 0, 0, 0, time.UTC)
+	closedTTL := marketQuoteTTL(MarketQuote{MarketStatus: MarketClosed, MIC: "XNAS", QuoteTimestamp: previousClose}, preOpen)
+	require.Equal(t, 30*time.Minute, closedTTL, "a known pre-open quote is refreshed at the opening bell if sooner than the closed TTL")
 }
 func TestMarketQuotaLowHeadroomLKGAndReset(t *testing.T) {
 	a, calls := quotaAdapter(t, true)
@@ -566,14 +570,15 @@ func TestMarketEightSymbolQuotaDeferralKeepsLastKnownGoodVisible(t *testing.T) {
 	quotes, err := a.Quotes(t.Context(), request)
 	require.NoError(t, err)
 	require.Len(t, quotes, 8)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		require.Empty(t, quotes[i].ErrorCode)
 		require.False(t, quotes[i].Stale)
 	}
-	for i := 5; i < 8; i++ {
-		require.Empty(t, quotes[i].ErrorCode, "quota deferral must serve cached data rather than a false PLAN/invalid-symbol error")
-		require.True(t, quotes[i].Stale)
-		require.Equal(t, 100.0, quotes[i].Price)
+	for i := range 3 {
+		index := i + 5
+		require.Empty(t, quotes[index].ErrorCode, "quota deferral must serve cached data rather than a false PLAN/invalid-symbol error")
+		require.True(t, quotes[index].Stale)
+		require.Equal(t, 100.0, quotes[index].Price)
 	}
 	firstCallCount := calls.Load()
 	for range 10 {
