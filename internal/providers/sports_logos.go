@@ -3,6 +3,7 @@ package providers
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/base64"
 	"errors"
 	"image"
@@ -29,6 +30,18 @@ const (
 	sportsLogoFreshTTL   = 7 * 24 * time.Hour
 	sportsLogoStaleTTL   = 30 * 24 * time.Hour
 	sportsLogoRetryDelay = time.Minute
+)
+
+// The current NHL SVG for Nashville contains a compound final accent path that
+// oksvg/rasterx paints over the entire mark. Keep a small approved raster
+// override in the same normalization pipeline until that SVG is supported.
+//
+//go:embed assets/sports/nashville-predators.png
+var nashvillePredatorsLogo []byte
+
+var (
+	nashvilleLogoOnce sync.Once
+	nashvilleLogoData string
 )
 
 // SportsLogoCache acquires provider logos on the server, converts them to a
@@ -63,34 +76,33 @@ func NewSportsLogoCache(client *http.Client) *SportsLogoCache {
 func (cache *SportsLogoCache) Hydrate(ctx context.Context, snapshot SportsSnapshot) SportsSnapshot {
 	result := cloneSportsSnapshot(snapshot)
 	urls := sportsLogoURLs(result)
-	if len(urls) == 0 {
-		return result
+	if len(urls) > 0 {
+		size := sportsLogoSize
+		if snapshot.League == LeagueMLB {
+			size = 16
+		} // Preserve the existing MLB asset contract.
+		logos := make(map[string]string, len(urls))
+		var mu sync.Mutex
+		var group sync.WaitGroup
+		for _, logoURL := range urls {
+			logoURL := logoURL
+			group.Add(1)
+			go func() {
+				defer group.Done()
+				data, _, err := cache.Cache.Get(ctx, strconv.Itoa(size)+":"+logoURL, sportsLogoFreshTTL, sportsLogoStaleTTL, func(ctx context.Context) (string, error) {
+					return cache.fetchSize(ctx, logoURL, size)
+				})
+				if err == nil && data != "" {
+					mu.Lock()
+					logos[logoURL] = data
+					mu.Unlock()
+				}
+			}()
+		}
+		group.Wait()
+		applySportsLogos(&result, logos)
 	}
-
-	size := sportsLogoSize
-	if snapshot.League == LeagueMLB {
-		size = 16
-	} // Preserve the existing MLB asset contract.
-	logos := make(map[string]string, len(urls))
-	var mu sync.Mutex
-	var group sync.WaitGroup
-	for _, logoURL := range urls {
-		logoURL := logoURL
-		group.Add(1)
-		go func() {
-			defer group.Done()
-			data, _, err := cache.Cache.Get(ctx, strconv.Itoa(size)+":"+logoURL, sportsLogoFreshTTL, sportsLogoStaleTTL, func(ctx context.Context) (string, error) {
-				return cache.fetchSize(ctx, logoURL, size)
-			})
-			if err == nil && data != "" {
-				mu.Lock()
-				logos[logoURL] = data
-				mu.Unlock()
-			}
-		}()
-	}
-	group.Wait()
-	applySportsLogos(&result, logos)
+	applySportsLogoOverrides(&result)
 	return result
 }
 
@@ -214,6 +226,9 @@ func sportsLogoURLs(snapshot SportsSnapshot) []string {
 	seen := map[string]bool{}
 	result := []string{}
 	add := func(team Team) {
+		if approvedSportsLogo(snapshot.League, team) != nil {
+			return
+		}
 		if team.ProviderLogoURL != "" && !seen[team.ProviderLogoURL] {
 			seen[team.ProviderLogoURL] = true
 			result = append(result, team.ProviderLogoURL)
@@ -248,6 +263,42 @@ func applySportsLogos(snapshot *SportsSnapshot, logos map[string]string) {
 		apply(&snapshot.NextGame.AwayTeam)
 		apply(&snapshot.NextGame.HomeTeam)
 	}
+}
+
+func applySportsLogoOverrides(snapshot *SportsSnapshot) {
+	apply := func(team *Team) {
+		if logo := approvedSportsLogo(snapshot.League, *team); logo == nil {
+			return
+		}
+		nashvilleLogoOnce.Do(func() {
+			pngData, err := normalizeSportsLogo(nashvillePredatorsLogo, "image/png")
+			if err == nil {
+				nashvilleLogoData = base64.StdEncoding.EncodeToString(pngData)
+			}
+		})
+		if nashvilleLogoData != "" {
+			team.LogoData = nashvilleLogoData
+		}
+	}
+	for index := range snapshot.Games {
+		apply(&snapshot.Games[index].AwayTeam)
+		apply(&snapshot.Games[index].HomeTeam)
+	}
+	for index := range snapshot.UpcomingGames {
+		apply(&snapshot.UpcomingGames[index].AwayTeam)
+		apply(&snapshot.UpcomingGames[index].HomeTeam)
+	}
+	if snapshot.NextGame != nil {
+		apply(&snapshot.NextGame.AwayTeam)
+		apply(&snapshot.NextGame.HomeTeam)
+	}
+}
+
+func approvedSportsLogo(league LeagueID, team Team) []byte {
+	if league == LeagueNHL && strings.EqualFold(team.Abbreviation, "NSH") {
+		return nashvillePredatorsLogo
+	}
+	return nil
 }
 
 // Provider PNGs often contain wide transparent margins. Fit the artwork itself.
