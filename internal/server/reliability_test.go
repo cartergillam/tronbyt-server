@@ -427,7 +427,7 @@ func TestProductionLineageMigrationAndCleanupRehearsal(t *testing.T) {
 	db := openDB()
 	dbSQL, err := db.DB()
 	require.NoError(t, err)
-	defer dbSQL.Close()
+	t.Cleanup(func() { require.NoError(t, dbSQL.Close()) })
 	require.NoError(t, db.AutoMigrate(
 		&data.User{},
 		&data.Device{},

@@ -85,10 +85,7 @@ func (cache *SportsLogoCache) Hydrate(ctx context.Context, snapshot SportsSnapsh
 		var mu sync.Mutex
 		var group sync.WaitGroup
 		for _, logoURL := range urls {
-			logoURL := logoURL
-			group.Add(1)
-			go func() {
-				defer group.Done()
+			group.Go(func() {
 				data, _, err := cache.Cache.Get(ctx, strconv.Itoa(size)+":"+logoURL, sportsLogoFreshTTL, sportsLogoStaleTTL, func(ctx context.Context) (string, error) {
 					return cache.fetchSize(ctx, logoURL, size)
 				})
@@ -97,17 +94,13 @@ func (cache *SportsLogoCache) Hydrate(ctx context.Context, snapshot SportsSnapsh
 					logos[logoURL] = data
 					mu.Unlock()
 				}
-			}()
+			})
 		}
 		group.Wait()
 		applySportsLogos(&result, logos)
 	}
 	applySportsLogoOverrides(&result)
 	return result
-}
-
-func (cache *SportsLogoCache) fetch(ctx context.Context, logoURL string) (string, error) {
-	return cache.fetchSize(ctx, logoURL, sportsLogoSize)
 }
 
 func (cache *SportsLogoCache) fetchSize(ctx context.Context, logoURL string, size int) (string, error) {
@@ -199,10 +192,6 @@ func normalizeLogoAtSize(body []byte, contentType string, size int) ([]byte, err
 		return nil, err
 	}
 	return encoded.Bytes(), nil
-}
-
-func fitLogoSize(width, height float64) (int, int) {
-	return fitLogoSizeAt(width, height, sportsLogoSize)
 }
 
 func fitLogoSizeAt(width, height float64, size int) (int, int) {

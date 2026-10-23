@@ -57,8 +57,8 @@ func TestSportsLogoCacheNormalizesCachesAndHydratesEverySnapshotLocation(t *test
 	require.NoError(t, err)
 	assert.Equal(t, "png", format)
 	assert.Equal(t, image.Rect(0, 0, 20, 20), imageValue.Bounds())
-	_, _, _, cornerAlpha := imageValue.At(0, 0).RGBA()
-	_, _, _, centerAlpha := imageValue.At(8, 8).RGBA()
+	cornerAlpha := color.NRGBAModel.Convert(imageValue.At(0, 0)).(color.NRGBA).A
+	centerAlpha := color.NRGBAModel.Convert(imageValue.At(8, 8)).(color.NRGBA).A
 	assert.Zero(t, cornerAlpha, "aspect-fit padding remains transparent")
 	assert.NotZero(t, centerAlpha, "logo pixels remain visible after normalization")
 }
