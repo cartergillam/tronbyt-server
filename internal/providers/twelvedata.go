@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	marketOpenFreshTTL     = 5 * time.Minute
+	marketOpenFreshTTL     = 15 * time.Minute
 	marketClosedFreshTTL   = 60 * time.Minute
 	marketStaleTTL         = 72 * time.Hour
 	marketRateLimitBackoff = 15 * time.Minute
@@ -30,25 +30,28 @@ type marketFailure struct {
 }
 
 type TwelveDataAdapter struct {
-	quoteMu      sync.Mutex // Coalesce overlapping watchlists before deciding which listings need a batch.
-	usageMu      sync.Mutex
-	usage        map[[32]byte]marketUsage
-	diagnostics  MarketDiagnostics
-	Credentials  CredentialResolver
-	Client       *http.Client
-	BaseURL      string
-	Cache        *Cache[[]MarketQuote]
-	SearchCache  *Cache[[]MarketListing]
-	LogoCache    *Cache[string]
-	LogoImages   *marketLogoImages
-	searchMu     sync.Mutex
-	searchLast   map[string]time.Time
-	backoffMu    sync.Mutex
-	backoffUntil map[string]time.Time
-	failureMu    sync.Mutex
-	failures     map[string]marketFailure
-	quoteStateMu sync.Mutex
-	quoteState   map[string]marketQuoteState
+	quoteMu            sync.Mutex // Coalesce overlapping watchlists before deciding which listings need a batch.
+	usageMu            sync.Mutex
+	usage              map[[32]byte]marketUsage
+	diagnostics        MarketDiagnostics
+	Credentials        CredentialResolver
+	Client             *http.Client
+	BaseURL            string
+	Cache              *Cache[[]MarketQuote]
+	SearchCache        *Cache[[]MarketListing]
+	LogoCache          *Cache[string]
+	LogoImages         *marketLogoImages
+	searchMu           sync.Mutex
+	searchLast         map[string]time.Time
+	backoffMu          sync.Mutex
+	backoffUntil       map[string]time.Time
+	failureMu          sync.Mutex
+	failures           map[string]marketFailure
+	quoteStateMu       sync.Mutex
+	quoteState         map[string]marketQuoteState
+	quotaStore         MarketQuotaStore
+	quotaPolicy        MarketQuotaPolicy
+	quotaStoreRequired bool
 }
 
 type marketQuoteState struct {
@@ -63,7 +66,7 @@ func NewTwelveDataAdapter(credentials CredentialResolver, client *http.Client) *
 		client = &http.Client{Timeout: 8 * time.Second}
 	}
 	return &TwelveDataAdapter{
-		Credentials: credentials, Client: client, BaseURL: "https://api.twelvedata.com", usage: make(map[[32]byte]marketUsage),
+		Credentials: credentials, Client: client, BaseURL: "https://api.twelvedata.com", usage: make(map[[32]byte]marketUsage), quotaPolicy: DefaultMarketQuotaPolicy(),
 		// Listing snapshots are shared across renders and installations within credential scope.
 		Cache:        NewCache[[]MarketQuote](marketOpenFreshTTL),
 		SearchCache:  NewCache[[]MarketListing](time.Second),
@@ -76,6 +79,12 @@ func NewTwelveDataAdapter(credentials CredentialResolver, client *http.Client) *
 	}
 }
 
+func (adapter *TwelveDataAdapter) SetQuotaProtection(store MarketQuotaStore, policy MarketQuotaPolicy) {
+	adapter.quotaStore = store
+	adapter.quotaPolicy = policy.Normalize()
+	adapter.quotaStoreRequired = true
+}
+
 func (adapter *TwelveDataAdapter) Quotes(ctx context.Context, request MarketRequest) ([]MarketQuote, error) {
 	if err := request.Validate(); err != nil {
 		return nil, err
@@ -83,13 +92,13 @@ func (adapter *TwelveDataAdapter) Quotes(ctx context.Context, request MarketRequ
 	return adapter.listingQuotes(ctx, request)
 }
 
-func quoteFreshTTL(quotes []MarketQuote) time.Duration {
+func (adapter *TwelveDataAdapter) quoteFreshTTL(quotes []MarketQuote) time.Duration {
 	for _, quote := range quotes {
 		if quote.MarketStatus == MarketOpen || quote.ErrorCode != "" {
-			return marketOpenFreshTTL
+			return adapter.quotaPolicy.OpenRefresh
 		}
 	}
-	return marketClosedFreshTTL
+	return adapter.quotaPolicy.ClosedRefresh
 }
 
 func (adapter *TwelveDataAdapter) rateLimited(key string) bool {

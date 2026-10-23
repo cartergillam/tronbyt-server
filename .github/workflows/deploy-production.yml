@@ -7,7 +7,7 @@ on:
         description: Full SHA of the reviewed tronbyt-apps commit to deploy
         required: true
         type: string
-        default: 0b2395e8e8a9ce071c5689e6e3b4ff8af0690a09
+        default: a0746987a714c18632ba10169d809b51ea191cd5
 
 permissions:
   contents: read

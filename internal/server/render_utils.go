@@ -141,11 +141,11 @@ func (s *Server) injectManagedProviderData(ctx context.Context, device *data.Dev
 			return
 		}
 		symbols := providerSymbols(config["symbols"])
-		request := providers.MarketRequest{Symbols: symbols, CredentialID: credentialID, ScopeType: "server_owner", ScopeID: device.Username}
+		request := providers.MarketRequest{Symbols: symbols, CredentialID: credentialID, ScopeType: "server_owner", ScopeID: device.Username, MaxSymbols: s.marketMaxSymbols()}
 		if raw, ok := config["watchlist"].(string); ok && strings.TrimSpace(raw) != "" {
-			listings, err := providers.ParseMarketWatchlist(raw)
+			listings, err := providers.ParseMarketWatchlistLimit(raw, request.MaxSymbols)
 			if err != nil {
-				setError(providers.SanitizedError{Code: "invalid_symbol", Message: "Choose between 1 and 10 distinct listings"})
+				setError(providers.SanitizedError{Code: "market_symbol_limit", Message: "Choose between 1 and " + strconv.Itoa(request.MaxSymbols) + " distinct listings"})
 				return
 			}
 			request.Listings = listings
@@ -693,9 +693,9 @@ func (s *Server) marketRenderContextHash(ctx context.Context, device *data.Devic
 	if err != nil {
 		return base + ":unconfigured"
 	}
-	request := providers.MarketRequest{Symbols: providerSymbols(app.Config["symbols"]), CredentialID: id, ScopeType: "server_owner", ScopeID: device.Username}
+	request := providers.MarketRequest{Symbols: providerSymbols(app.Config["symbols"]), CredentialID: id, ScopeType: "server_owner", ScopeID: device.Username, MaxSymbols: s.marketMaxSymbols()}
 	if raw, ok := app.Config["watchlist"].(string); ok && strings.TrimSpace(raw) != "" {
-		request.Listings, err = providers.ParseMarketWatchlist(raw)
+		request.Listings, err = providers.ParseMarketWatchlistLimit(raw, request.MaxSymbols)
 		if err != nil {
 			return base + ":invalid"
 		}
