@@ -20,21 +20,22 @@ import (
 	"time"
 )
 
-//go:embed market_logo_overrides/*.svg
+//go:embed market_logo_overrides/*.svg market_logo_overrides/*.png
 var marketLogoOverrides embed.FS
 
 var approvedMarketLogos = map[string]string{
-	"twelvedata:AAPL:XNAS": "apple.svg",
-	"twelvedata:MSFT:XNAS": "microsoft.svg",
+	"twelvedata:AAPL:XNAS":   "apple.svg",
+	"twelvedata:MSFT:XNAS":   "microsoft.svg",
+	"twelvedata:PLZ.UN:XTSE": "plaza.png",
 }
 
 const marketLogoNormalizationVersion = "market-logo-v3"
 
-// Includes all embedded assets: any curated edit invalidates only Market Watch
+// MarketLogoRevision includes all embedded assets: any curated edit invalidates only Market Watch
 // logos and render output, never quote snapshots or unrelated app caches.
 func MarketLogoRevision() string {
 	bodies := [][]byte{}
-	for _, name := range []string{"apple.svg", "microsoft.svg"} {
+	for _, name := range []string{"apple.svg", "microsoft.svg", "plaza.png"} {
 		body, _ := marketLogoOverrides.ReadFile("market_logo_overrides/" + name)
 		bodies = append(bodies, body)
 	}
@@ -53,22 +54,37 @@ func approvedMarketLogoName(listing MarketListing) string {
 	id := listing.ID
 	// NASDAQ's market segments are distinct listing IDs but share these marks.
 	for _, mic := range []string{"XNGS", "XNMS", "XNCM"} {
-		if strings.HasSuffix(id, ":"+mic) {
-			id = strings.TrimSuffix(id, ":"+mic) + ":XNAS"
+		if canonical, found := strings.CutSuffix(id, ":"+mic); found {
+			id = canonical + ":XNAS"
 		}
 	}
-	return approvedMarketLogos[id]
+	name := approvedMarketLogos[id]
+	switch name {
+	case "apple.svg", "microsoft.svg":
+		if listing.Currency != "USD" {
+			return ""
+		}
+	case "plaza.png":
+		if listing.Currency != "CAD" {
+			return ""
+		}
+	}
+	return name
 }
 func bundledMarketLogo(listing MarketListing) string {
 	name := approvedMarketLogoName(listing)
-	if name == "" || listing.Currency != "USD" {
+	if name == "" {
 		return ""
 	}
 	body, err := marketLogoOverrides.ReadFile("market_logo_overrides/" + name)
 	if err != nil {
 		return ""
 	}
-	normalized, err := normalizeLogoAtSize(body, "image/svg+xml", 18)
+	contentType := "image/svg+xml"
+	if strings.HasSuffix(strings.ToLower(name), ".png") {
+		contentType = "image/png"
+	}
+	normalized, err := normalizeLogoAtSize(body, contentType, 18)
 	if err != nil {
 		return ""
 	}
@@ -105,7 +121,7 @@ func (adapter *TwelveDataAdapter) marketJSON(ctx context.Context, path string, q
 		return TemporarilyUnavailable()
 	}
 	adapter.observeCredits(secret, response.Header)
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 512*1024+1))
 	if err != nil || len(body) > 512*1024 {
 		return TemporarilyUnavailable()
@@ -134,18 +150,27 @@ func (adapter *TwelveDataAdapter) HydrateQuotes(ctx context.Context, request Mar
 	defer cancel()
 	var group sync.WaitGroup
 	for index, quote := range result {
-		if quote.ErrorCode != "" {
-			continue
+		listingData := MarketListing{Symbol: strings.Split(quote.Symbol, ":")[0], Exchange: quote.Exchange, MIC: quote.MIC, Currency: quote.Currency}
+		// Explicit selected-listing metadata survives provider errors such as
+		// PLAN REQUIRED and can still identify a bundled logo safely.
+		if quote.ErrorCode != "" && index < len(request.Listings) {
+			selected := request.Listings[index]
+			if strings.EqualFold(strings.Split(selected.Symbol, ":")[0], listingData.Symbol) {
+				listingData = selected
+			}
 		}
-		listing, err := (MarketListing{Symbol: strings.Split(quote.Symbol, ":")[0], Exchange: quote.Exchange, MIC: quote.MIC, Currency: quote.Currency}).Normalize()
+		listing, err := listingData.Normalize()
 		if err != nil {
 			continue
 		}
-		if approvedMarketLogoName(listing) != "" && listing.Currency == "USD" {
+		if approvedMarketLogoName(listing) != "" {
 			key := "curated:" + listing.ID + ":" + MarketLogoRevision()
 			logo, _, _ := adapter.LogoCache.Get(ctx, key, 365*24*time.Hour, 365*24*time.Hour, func(context.Context) (string, error) { return bundledMarketLogo(listing), nil })
 			result[index].LogoData = logo
 			result[index].LogoVersion = MarketLogoRevision()
+			continue
+		}
+		if quote.ErrorCode != "" {
 			continue
 		}
 		group.Add(1)

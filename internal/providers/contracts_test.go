@@ -21,7 +21,20 @@ func TestMarketContractLimitsSymbols(t *testing.T) {
 	assert.Error(t, (MarketRequest{Symbols: nil}).Validate())
 	assert.Error(t, (MarketRequest{Symbols: []string{"AAPL", "aapl"}}).Validate())
 	assert.NoError(t, (MarketRequest{Symbols: []string{"1", "2", "3", "4", "5"}}).Validate())
+	assert.Error(t, (MarketRequest{Symbols: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}}).Validate())
 	assert.Error(t, (MarketRequest{Symbols: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"}}).Validate())
+}
+
+func TestMarketWatchlistLimitReturnsFriendlyEightSymbolError(t *testing.T) {
+	listings := []MarketListing{}
+	for _, symbol := range []string{"AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "AMD", "INTC", "SHOP"} {
+		listings = append(listings, MarketListing{Symbol: symbol})
+	}
+	raw, err := json.Marshal(listings)
+	require.NoError(t, err)
+	_, err = ParseMarketWatchlistLimit(string(raw), 8)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "choose between 1 and 8 stocks")
 }
 
 func TestSportsSnapshotJSONUsesEmptyArraysForAbsentCollections(t *testing.T) {
@@ -212,7 +225,7 @@ func TestTwelveDataAdapterUsesClosedMarketTTLAndExplicitEODStatus(t *testing.T) 
 	adapter.Cache.mu.Lock()
 	entry := adapter.Cache.entries[key]
 	adapter.Cache.mu.Unlock()
-	assert.WithinDuration(t, time.Now().Add(marketClosedFreshTTL), entry.freshUntil, time.Second)
+	assert.WithinDuration(t, time.Now().Add(marketQuoteTTL(quotes[0], time.Now())), entry.freshUntil, time.Second)
 	assert.Equal(t, int32(1), calls.Load())
 }
 

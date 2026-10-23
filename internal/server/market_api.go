@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"tronbyt-server/internal/data"
 	"tronbyt-server/internal/providers"
@@ -14,11 +15,24 @@ type marketQuoteDiagnosticResponse struct {
 	ProviderID   string                            `json:"providerID"`
 	CredentialID string                            `json:"credentialID"`
 	Quotes       []providers.MarketQuoteDiagnostic `json:"quotes"`
+	Quota        *providers.MarketQuotaSnapshot    `json:"quota,omitempty"`
+	Limits       *marketQuotaDiagnosticLimits      `json:"limits,omitempty"`
+}
+
+type marketQuotaDiagnosticLimits struct {
+	MaxSymbols           int `json:"maxSymbols"`
+	OpenRefreshSeconds   int `json:"openRefreshSeconds"`
+	ClosedRefreshSeconds int `json:"closedRefreshSeconds"`
+	DailyCredits         int `json:"dailyCredits"`
+	MinuteCredits        int `json:"minuteCredits"`
+	NewSymbolsPerDay     int `json:"newSymbolsPerDay"`
 }
 
 // handleMarketQuoteDiagnostics is owner-only at route registration. It reads
 // installed configuration and in-memory adapter state without refreshing data.
 func (s *Server) handleMarketQuoteDiagnostics(w http.ResponseWriter, r *http.Request) {
+	policy := marketQuotaPolicyFromConfig(s.Config)
+	limits := &marketQuotaDiagnosticLimits{MaxSymbols: policy.MaxSymbols, OpenRefreshSeconds: int(policy.OpenRefresh / time.Second), ClosedRefreshSeconds: int(policy.ClosedRefresh / time.Second), DailyCredits: policy.DailyCredits, MinuteCredits: policy.MinuteCredits, NewSymbolsPerDay: policy.NewSymbolsPerDay}
 	device := GetDevice(r)
 	var app *data.App
 	for i := range device.Apps {
@@ -41,12 +55,12 @@ func (s *Server) handleMarketQuoteDiagnostics(w http.ResponseWriter, r *http.Req
 	}
 	credentialID, err := s.marketCredential(r.Context(), device, credentialID)
 	if err != nil {
-		request, requestErr := marketDiagnosticsRequest(device, app, logicalCredentialID)
+		request, requestErr := marketDiagnosticsRequest(device, app, logicalCredentialID, s.marketMaxSymbols())
 		if requestErr != nil {
 			writeAPIError(w, http.StatusUnprocessableEntity, "market_diagnostics_unavailable", "Market Watch diagnostics could not be read", nil)
 			return
 		}
-		response := marketQuoteDiagnosticResponse{ProviderID: "twelve-data", CredentialID: logicalCredentialID, Quotes: make([]providers.MarketQuoteDiagnostic, 0, len(request.Symbols)+len(request.Listings))}
+		response := marketQuoteDiagnosticResponse{ProviderID: "twelve-data", CredentialID: logicalCredentialID, Quotes: make([]providers.MarketQuoteDiagnostic, 0, len(request.Symbols)+len(request.Listings)), Limits: limits}
 		if request.Listings != nil {
 			for _, listing := range request.Listings {
 				response.Quotes = append(response.Quotes, providers.MarketQuoteDiagnostic{Symbol: listing.Symbol, ProviderID: "twelve-data", CredentialID: logicalCredentialID, FailureReason: "INVALID_CREDENTIAL"})
@@ -59,7 +73,7 @@ func (s *Server) handleMarketQuoteDiagnostics(w http.ResponseWriter, r *http.Req
 		writeMarketQuoteDiagnostics(w, response)
 		return
 	}
-	request, err := marketDiagnosticsRequest(device, app, credentialID)
+	request, err := marketDiagnosticsRequest(device, app, credentialID, s.marketMaxSymbols())
 	if err != nil {
 		writeAPIError(w, http.StatusUnprocessableEntity, "market_diagnostics_unavailable", "Market Watch diagnostics could not be read", nil)
 		return
@@ -74,16 +88,45 @@ func (s *Server) handleMarketQuoteDiagnostics(w http.ResponseWriter, r *http.Req
 		writeAPIError(w, http.StatusUnprocessableEntity, "market_diagnostics_unavailable", "Market Watch diagnostics could not be read", nil)
 		return
 	}
-	writeMarketQuoteDiagnostics(w, marketQuoteDiagnosticResponse{ProviderID: "twelve-data", CredentialID: credentialID, Quotes: quotes})
+	response := marketQuoteDiagnosticResponse{ProviderID: diagnosticProviderID(quotes), CredentialID: logicalCredentialID, Quotes: quotes, Limits: limits}
+	if quotaProvider, ok := s.MarketProvider.(providers.MarketQuotaDiagnosticProvider); ok {
+		if usage, policy, quotaErr := quotaProvider.CredentialQuotaDiagnostics(r.Context(), credentialID, "server_owner", device.Username); quotaErr == nil {
+			response.Quota = &usage
+			response.Limits = &marketQuotaDiagnosticLimits{MaxSymbols: policy.MaxSymbols, OpenRefreshSeconds: int(policy.OpenRefresh / time.Second), ClosedRefreshSeconds: int(policy.ClosedRefresh / time.Second), DailyCredits: policy.DailyCredits, MinuteCredits: policy.MinuteCredits, NewSymbolsPerDay: policy.NewSymbolsPerDay}
+		}
+	}
+	writeMarketQuoteDiagnostics(w, response)
 }
 
-func marketDiagnosticsRequest(device *data.Device, app *data.App, credentialID string) (providers.MarketRequest, error) {
-	request := providers.MarketRequest{CredentialID: credentialID, ScopeType: "server_owner", ScopeID: device.Username}
+func diagnosticProviderID(quotes []providers.MarketQuoteDiagnostic) string {
+	providerID := ""
+	for _, quote := range quotes {
+		if quote.ProviderID == "" {
+			continue
+		}
+		if providerID == "" {
+			providerID = quote.ProviderID
+		} else if providerID != quote.ProviderID {
+			return "mixed"
+		}
+	}
+	if providerID == "" {
+		return "twelve-data"
+	}
+	return providerID
+}
+
+func marketDiagnosticsRequest(device *data.Device, app *data.App, credentialID string, maxSymbols ...int) (providers.MarketRequest, error) {
+	limit := providers.MaxMarketSymbols
+	if len(maxSymbols) > 0 && maxSymbols[0] > 0 && maxSymbols[0] < limit {
+		limit = maxSymbols[0]
+	}
+	request := providers.MarketRequest{CredentialID: credentialID, ScopeType: "server_owner", ScopeID: device.Username, MaxSymbols: limit}
 	if app.Config == nil {
 		return request, errors.New("missing Market Watch config")
 	}
 	if raw, ok := app.Config["watchlist"].(string); ok && strings.TrimSpace(raw) != "" {
-		listings, err := providers.ParseMarketWatchlist(raw)
+		listings, err := providers.ParseMarketWatchlistLimit(raw, request.MaxSymbols)
 		if err != nil {
 			return request, err
 		}

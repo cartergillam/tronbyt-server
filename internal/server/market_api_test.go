@@ -30,6 +30,9 @@ func (stub *marketSearchStub) QuoteDiagnostics(_ context.Context, request provid
 	stub.diagnostics = append(stub.diagnostics, request)
 	return []providers.MarketQuoteDiagnostic{{Symbol: "AAPL", ProviderID: "twelve-data", CredentialID: request.CredentialID, FailureReason: "NETWORK_ERROR", Stale: true, RetryBackoffActive: true}}, nil
 }
+func (stub *marketSearchStub) CredentialQuotaDiagnostics(context.Context, string, string, string) (providers.MarketQuotaSnapshot, providers.MarketQuotaPolicy, error) {
+	return providers.MarketQuotaSnapshot{MinuteCreditsUsed: 4, DailyCreditsUsed: 90, BlockedRequests: 2}, providers.DefaultMarketQuotaPolicy(), nil
+}
 
 func TestMarketQuoteDiagnosticsAreOwnerOnlyAndSanitized(t *testing.T) {
 	s := newTestServerAPI(t)
@@ -53,6 +56,15 @@ func TestMarketQuoteDiagnosticsAreOwnerOnlyAndSanitized(t *testing.T) {
 	assert.Equal(t, "market-primary", stub.diagnostics[0].CredentialID)
 	assert.NotContains(t, allowed.Body.String(), "authorization")
 	assert.NotContains(t, allowed.Body.String(), "apikey")
+	assert.Contains(t, allowed.Body.String(), `"dailyCredits":500`)
+	assert.Contains(t, allowed.Body.String(), `"dailyReservedCredits":90`)
+	assert.Contains(t, allowed.Body.String(), `"blockedRequests":2`)
+}
+
+func TestDiagnosticProviderIDIdentifiesExperimentalOrMixedQuotes(t *testing.T) {
+	assert.Equal(t, "yahoo-finance-experimental", diagnosticProviderID([]providers.MarketQuoteDiagnostic{{ProviderID: "yahoo-finance-experimental"}}))
+	assert.Equal(t, "mixed", diagnosticProviderID([]providers.MarketQuoteDiagnostic{{ProviderID: "twelve-data"}, {ProviderID: "yahoo-finance-experimental"}}))
+	assert.Equal(t, "twelve-data", diagnosticProviderID([]providers.MarketQuoteDiagnostic{{ProviderID: "twelve-data"}}))
 }
 
 func TestMarketSearchAuthorizationAndOwnerScope(t *testing.T) {
@@ -85,6 +97,10 @@ func TestMarketWatchlistConfigAndRenderContract(t *testing.T) {
 	assert.Contains(t, errs, "watchlist")
 	_, errs = validateConfigPatch(schema, map[string]any{"symbols": "AAPL"}, map[string]any{})
 	assert.Empty(t, errs)
+	tooMany := `[{"symbol":"AAPL"},{"symbol":"MSFT"},{"symbol":"NVDA"},{"symbol":"SHOP"},{"symbol":"PLZ.UN"},{"symbol":"GOOG"},{"symbol":"AMZN"},{"symbol":"META"},{"symbol":"BRK.B"}]`
+	_, errs = validateConfigPatch(schema, nil, map[string]any{"watchlist": tooMany}, 8)
+	assert.Contains(t, errs, "watchlist")
+	assert.Contains(t, errs["watchlist"], "1 and 8")
 	stub := &marketSearchStub{}
 	s := &Server{MarketProvider: stub}
 	result["credential_id"] = "primary"

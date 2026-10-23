@@ -763,7 +763,11 @@ func normalizeConfigValue(field *normalizedSchemaField, value any) (any, error) 
 	return value, nil
 }
 
-func validateConfigPatch(schema normalizedSchema, existing, patch map[string]any) (map[string]any, map[string]string) {
+func validateConfigPatch(schema normalizedSchema, existing, patch map[string]any, limits ...int) (map[string]any, map[string]string) {
+	maxSymbols := providers.MaxMarketSymbols
+	if len(limits) > 0 && limits[0] > 0 && limits[0] < maxSymbols {
+		maxSymbols = limits[0]
+	}
 	result := normalizedLegacyConfig(schema, existing)
 	fieldErrors := map[string]string{}
 	for key, value := range patch {
@@ -797,12 +801,21 @@ func validateConfigPatch(schema normalizedSchema, existing, patch map[string]any
 	}
 	if findSchemaField(schema, "watchlist") != nil && findSchemaField(schema, "symbols") != nil {
 		if raw, ok := result["watchlist"].(string); ok && strings.TrimSpace(raw) != "" {
-			listings, err := providers.ParseMarketWatchlist(raw)
+			listings, err := providers.ParseMarketWatchlistLimit(raw, maxSymbols)
 			if err != nil {
 				fieldErrors["watchlist"] = err.Error()
 			} else {
 				encoded, _ := json.Marshal(listings)
 				result["watchlist"] = string(encoded)
+			}
+		}
+		watchlistValue, hasWatchlist := result["watchlist"].(string)
+		if !hasWatchlist || strings.TrimSpace(watchlistValue) == "" {
+			if raw, ok := result["symbols"].(string); ok && strings.TrimSpace(raw) != "" {
+				request := providers.MarketRequest{Symbols: providerSymbols(raw), MaxSymbols: maxSymbols}
+				if err := request.Validate(); err != nil {
+					fieldErrors["symbols"] = err.Error()
+				}
 			}
 		}
 	}
@@ -972,7 +985,7 @@ func (s *Server) handleInstallationConfigPatch(w http.ResponseWriter, r *http.Re
 		writeAPIError(w, 403, "owner_required", "Only the owner can change market credentials", nil)
 		return
 	}
-	updated, fieldErrors := validateConfigPatch(schema, app.Config, request.Config)
+	updated, fieldErrors := validateConfigPatch(schema, app.Config, request.Config, s.marketMaxSymbols())
 	if len(fieldErrors) > 0 {
 		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_config", "Configuration validation failed", fieldErrors)
 		return
@@ -1115,7 +1128,7 @@ func (s *Server) handleInstallationCreate(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, 403, "owner_required", "Only the owner can change market credentials", nil)
 		return
 	}
-	config, fieldErrors := validateConfigPatch(schema, schemaDefaults(schema), request.Config)
+	config, fieldErrors := validateConfigPatch(schema, schemaDefaults(schema), request.Config, s.marketMaxSymbols())
 	for _, field := range schema.Fields {
 		if !field.Required {
 			continue

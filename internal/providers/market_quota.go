@@ -16,23 +16,20 @@ import (
 
 const marketSearchTTL = 24 * time.Hour
 
-// Counters contain no listing, user, credential, or request URL information.
+// MarketDiagnostics contains no listing, user, credential, or request URL information.
 type MarketDiagnostics struct {
 	ProviderRequests, SymbolsRefreshed, EstimatedQuoteCredits, CacheHits, CacheMisses, QuotaDefers uint64
 	LastBatchSize                                                                                  int
 }
-type marketCreditReservation struct {
-	At   time.Time
-	Cost int
-}
 type marketUsage struct {
-	Reservations                    []marketCreditReservation
-	MinuteUntil                     time.Time
-	Remaining                       int
-	ObservedAt                      time.Time
-	ObservedLeft, ObservedLimit     int
-	Day                             string
-	LocalCredits, LocalQuoteCredits int // Only this process's usage, never claimed as provider daily remaining.
+	MinuteBucket                              int64
+	MinuteUsed                                int
+	ObservedAt                                time.Time
+	ObservedLeft, ObservedLimit, ObservedUsed int
+	Day                                       string
+	LocalCredits                              int
+	DaySymbols                                map[string]bool
+	Blocked                                   uint64
 }
 
 type marketCreditDeferred struct{ SanitizedError }
@@ -46,47 +43,107 @@ func (a *TwelveDataAdapter) Diagnostics() MarketDiagnostics {
 	defer a.usageMu.Unlock()
 	return a.diagnostics
 }
+
+func (a *TwelveDataAdapter) CredentialQuotaDiagnostics(ctx context.Context, credentialID, scopeType, scopeID string) (MarketQuotaSnapshot, MarketQuotaPolicy, error) {
+	secret, err := a.Credentials.Resolve(ctx, credentialID, scopeType, scopeID)
+	if err != nil {
+		return MarketQuotaSnapshot{}, a.quotaPolicy, MissingCredential("Market data")
+	}
+	hash := sha256.Sum256([]byte(strings.TrimSpace(secret)))
+	key := fmt.Sprintf("%x", hash[:])
+	if a.quotaStoreRequired && a.quotaStore == nil {
+		return MarketQuotaSnapshot{}, a.quotaPolicy, errors.New("quota ledger unavailable")
+	}
+	if a.quotaStore != nil {
+		snapshot, err := a.quotaStore.ReadMarketQuota(ctx, key, a.quotaPolicy, time.Now())
+		return snapshot, a.quotaPolicy, err
+	}
+	a.usageMu.Lock()
+	defer a.usageMu.Unlock()
+	u := a.usage[hash]
+	now := time.Now()
+	minute, day := now.UTC().Truncate(time.Minute).Unix(), now.UTC().Format("2006-01-02")
+	snapshot := MarketQuotaSnapshot{DailyCreditsRemaining: a.quotaPolicy.DailyCredits, MinuteCreditsRemaining: a.quotaPolicy.MinuteCredits, BlockedRequests: u.Blocked}
+	if u.MinuteBucket == minute {
+		snapshot.MinuteCreditsUsed = u.MinuteUsed
+		snapshot.MinuteCreditsRemaining = max(0, a.quotaPolicy.MinuteCredits-u.MinuteUsed)
+		if u.ObservedAt.UTC().Truncate(time.Minute).Unix() == minute {
+			snapshot.ObservedCreditsLeft, snapshot.ProviderCreditsUsed, snapshot.ObservedAt = u.ObservedLeft, u.ObservedUsed, u.ObservedAt
+			snapshot.MinuteCreditsRemaining = min(snapshot.MinuteCreditsRemaining, u.ObservedLeft)
+		}
+	}
+	if u.Day == day {
+		snapshot.DailyCreditsUsed = u.LocalCredits
+		snapshot.DailyCreditsRemaining = max(0, a.quotaPolicy.DailyCredits-u.LocalCredits)
+		snapshot.NewSymbolsToday = len(u.DaySymbols)
+	}
+	if snapshot.MinuteCreditsRemaining == 0 {
+		snapshot.NextEligibleAt = now.UTC().Truncate(time.Minute).Add(time.Minute)
+	}
+	if snapshot.DailyCreditsRemaining == 0 || snapshot.NewSymbolsToday >= a.quotaPolicy.NewSymbolsPerDay {
+		snapshot.NextEligibleAt = time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day()+1, 0, 0, 0, 0, time.UTC)
+	}
+	return snapshot, a.quotaPolicy, nil
+}
 func (a *TwelveDataAdapter) reserveCredits(secret string, cost int, quote bool) bool {
+	return a.reserveCreditsForSymbols(context.Background(), secret, cost, quote, nil)
+}
+
+func (a *TwelveDataAdapter) reserveCreditsForSymbols(ctx context.Context, secret string, cost int, quote bool, symbols []string) bool {
 	a.usageMu.Lock()
 	defer a.usageMu.Unlock()
 	key := sha256.Sum256([]byte(strings.TrimSpace(secret)))
-	u := a.usage[key]
 	now := time.Now()
-	if !now.Before(u.MinuteUntil) {
-		u.Remaining = 8
-		u.MinuteUntil = now.Add(time.Minute)
-	}
-	spent := 0
-	reservations := u.Reservations[:0]
-	for _, r := range u.Reservations {
-		if now.Sub(r.At) < time.Minute {
-			spent += r.Cost
-			reservations = append(reservations, r)
-		}
-	}
-	u.Reservations = reservations
-	day := now.UTC().Format("2006-01-02")
-	if u.Day != day {
-		u.Day = day
-		u.LocalCredits = 0
-		u.LocalQuoteCredits = 0
-	}
-	// Leave room for search, validation, errors and other users of the key.
-	if cost > min(u.Remaining, 8-spent) || u.LocalCredits+cost > 750 || (quote && u.LocalQuoteCredits+cost > 700) {
-		a.usage[key] = u
+	hash := fmt.Sprintf("%x", key[:])
+	if a.quotaStoreRequired && a.quotaStore == nil {
 		a.diagnostics.QuotaDefers++
 		return false
 	}
-	u.Reservations = append(u.Reservations, marketCreditReservation{At: now, Cost: cost})
-	u.Remaining -= cost
-	u.LocalCredits += cost
+	if a.quotaStore != nil {
+		snapshot, allowed, err := a.quotaStore.ReserveMarketCredits(ctx, hash, cost, symbols, a.quotaPolicy, now)
+		if err != nil || !allowed {
+			a.diagnostics.QuotaDefers++
+			return false
+		}
+		_ = snapshot
+	} else {
+		u := a.usage[key]
+		minute := now.UTC().Truncate(time.Minute).Unix()
+		day := now.UTC().Format("2006-01-02")
+		if u.MinuteBucket != minute {
+			u.MinuteBucket, u.MinuteUsed, u.ObservedLeft = minute, 0, 0
+		}
+		if u.Day != day {
+			u.Day, u.LocalCredits, u.DaySymbols = day, 0, make(map[string]bool)
+		}
+		newSymbols := 0
+		for _, symbol := range symbols {
+			if !u.DaySymbols[symbol] {
+				newSymbols++
+			}
+		}
+		minuteCap := a.quotaPolicy.MinuteCredits
+		if u.ObservedAt.UTC().Truncate(time.Minute).Unix() == minute && u.ObservedLeft < minuteCap {
+			minuteCap = u.ObservedLeft
+		}
+		if u.MinuteUsed+cost > minuteCap || u.LocalCredits+cost > a.quotaPolicy.DailyCredits || len(u.DaySymbols)+newSymbols > a.quotaPolicy.NewSymbolsPerDay {
+			u.Blocked++
+			a.usage[key] = u
+			a.diagnostics.QuotaDefers++
+			return false
+		}
+		u.MinuteUsed += cost
+		u.LocalCredits += cost
+		for _, symbol := range symbols {
+			u.DaySymbols[symbol] = true
+		}
+		a.usage[key] = u
+	}
 	a.diagnostics.ProviderRequests++
 	if quote {
-		u.LocalQuoteCredits += cost
 		a.diagnostics.EstimatedQuoteCredits += uint64(cost)
 		a.diagnostics.LastBatchSize = cost
 	}
-	a.usage[key] = u
 	return true
 }
 func (a *TwelveDataAdapter) observeCredits(secret string, headers http.Header) {
@@ -95,24 +152,37 @@ func (a *TwelveDataAdapter) observeCredits(secret string, headers http.Header) {
 		return
 	}
 	used, usedErr := strconv.Atoi(headers.Get("api-credits-used"))
+	key := sha256.Sum256([]byte(strings.TrimSpace(secret)))
+	if a.quotaStore != nil {
+		if usedErr != nil || used < 0 || used > 1000000 {
+			used = 0
+		}
+		_ = a.quotaStore.ObserveMarketCredits(context.Background(), fmt.Sprintf("%x", key[:]), left, used, time.Now())
+	}
 	a.usageMu.Lock()
 	defer a.usageMu.Unlock()
-	key := sha256.Sum256([]byte(strings.TrimSpace(secret)))
 	u := a.usage[key]
-	u.ObservedAt = time.Now()
-	u.ObservedLeft = left
-	// Never raise locally reserved headroom: concurrent requests may still be in flight.
-	u.Remaining = min(u.Remaining, left)
+	now := time.Now()
+	minute := now.UTC().Truncate(time.Minute).Unix()
+	if u.MinuteBucket != minute {
+		u.MinuteBucket, u.MinuteUsed, u.ObservedLeft = minute, 0, left
+	}
+	// Out-of-order responses can only lower the observed headroom for this minute.
+	if u.ObservedAt.UTC().Truncate(time.Minute).Unix() != minute || left < u.ObservedLeft {
+		u.ObservedLeft = left
+	}
+	u.ObservedAt = now
 	if usedErr == nil && used >= 0 && used <= 1000000 {
 		u.ObservedLimit = left + used
+		u.ObservedUsed = used
 	}
 	a.usage[key] = u
 }
-func (a *TwelveDataAdapter) quoteBody(ctx context.Context, query url.Values, secret string, cost int) ([]byte, int, error) {
+func (a *TwelveDataAdapter) quoteBody(ctx context.Context, query url.Values, secret string, cost int, symbols []string) ([]byte, int, error) {
 	if strings.TrimSpace(secret) == "" {
 		return nil, 0, MissingCredential("Market data")
 	}
-	if !a.reserveCredits(secret, cost, true) {
+	if !a.reserveCreditsForSymbols(ctx, secret, cost, true, symbols) {
 		return nil, 0, marketQuotaError()
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(a.BaseURL, "/")+"/quote?"+query.Encode(), nil)
@@ -124,7 +194,7 @@ func (a *TwelveDataAdapter) quoteBody(ctx context.Context, query url.Values, sec
 	if err != nil {
 		return nil, 0, SanitizedError{Code: "provider_network_error", Message: "Market data is temporarily unavailable", Retryable: true}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	a.observeCredits(secret, resp.Header)
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024+1))
 	if err != nil || len(body) > 512*1024 {
@@ -151,7 +221,7 @@ func (a *TwelveDataAdapter) listingQuotes(ctx context.Context, r MarketRequest) 
 	inputs := []quoteInput{}
 	if r.Listings != nil {
 		raw, _ := json.Marshal(r.Listings)
-		listings, err := ParseMarketWatchlist(string(raw))
+		listings, err := ParseMarketWatchlistLimit(string(raw), r.MaxSymbols)
 		if err != nil {
 			return nil, err
 		}
@@ -239,7 +309,15 @@ func (a *TwelveDataAdapter) listingQuotes(ctx context.Context, r MarketRequest) 
 				symbols = append(symbols, inputs[i].symbol)
 			}
 			query.Set("symbol", strings.Join(symbols, ","))
-			body, status, err = a.quoteBody(ctx, query, secret, len(indices))
+			newSymbols := make([]string, 0, len(indices))
+			for _, i := range indices {
+				if inputs[i].listing != nil {
+					newSymbols = append(newSymbols, inputs[i].listing.ID)
+				} else {
+					newSymbols = append(newSymbols, inputs[i].symbol)
+				}
+			}
+			body, status, err = a.quoteBody(ctx, query, secret, len(indices), newSymbols)
 		}
 		var batch map[string]json.RawMessage
 		if err == nil && len(indices) > 1 {
@@ -291,12 +369,7 @@ func (a *TwelveDataAdapter) listingQuotes(ctx context.Context, r MarketRequest) 
 	for _, in := range inputs {
 		quotes, stale, err := a.Cache.GetWithTTL(ctx, in.key, marketStaleTTL, func(context.Context) ([]MarketQuote, time.Duration, error) {
 			if q, ok := fetched[in.key]; ok {
-				ttl := marketQuoteTTL(q, time.Now())
-				// For >8 active listings, a modest freshness relaxation avoids
-				// spending 780 credits just on an ordinary trading session.
-				if len(inputs) > 8 && q.MarketStatus == MarketOpen {
-					ttl = max(ttl, 6*time.Minute)
-				}
+				ttl := a.marketQuoteTTL(q, time.Now())
 				return []MarketQuote{q}, ttl, nil
 			}
 			if err := failures[in.key]; err != nil {
@@ -315,8 +388,7 @@ func (a *TwelveDataAdapter) listingQuotes(ctx context.Context, r MarketRequest) 
 				firstErr = err
 			}
 			code := "provider_unavailable"
-			var classified SanitizedError
-			if errors.As(err, &classified) {
+			if classified, ok := errors.AsType[SanitizedError](err); ok {
 				code = classified.Code
 				if code == "provider_network_error" {
 					// Keep the existing renderer-facing error contract; the richer
@@ -396,7 +468,7 @@ func (a *TwelveDataAdapter) QuoteDiagnostics(ctx context.Context, request Market
 	inputs := make([]quoteInput, 0, max(len(request.Symbols), len(request.Listings)))
 	if request.Listings != nil {
 		raw, _ := json.Marshal(request.Listings)
-		listings, err := ParseMarketWatchlist(string(raw))
+		listings, err := ParseMarketWatchlistLimit(string(raw), request.MaxSymbols)
 		if err != nil {
 			return nil, err
 		}
@@ -414,14 +486,12 @@ func (a *TwelveDataAdapter) QuoteDiagnostics(ctx context.Context, request Market
 	now := time.Now()
 	result := make([]MarketQuoteDiagnostic, 0, len(inputs))
 	for _, input := range inputs {
-		state := marketQuoteState{}
 		a.quoteStateMu.Lock()
-		state = a.quoteState[input.key]
+		state := a.quoteState[input.key]
 		a.quoteStateMu.Unlock()
 
-		entry, found := cacheEntry[[]MarketQuote]{}, false
 		a.Cache.mu.Lock()
-		entry, found = a.Cache.entries[input.key]
+		entry, found := a.Cache.entries[input.key]
 		a.Cache.mu.Unlock()
 		stale := found && now.After(entry.freshUntil) && now.Before(entry.staleUntil)
 
@@ -455,7 +525,7 @@ func (a *TwelveDataAdapter) QuoteDiagnostics(ctx context.Context, request Market
 // legacy resolvers retain their existing owner + credential identity.
 func (a *TwelveDataAdapter) credentialCacheScope(ctx context.Context, id, scopeType, scopeID string) (string, error) {
 	if resolver, ok := a.Credentials.(interface {
-		CredentialCacheScope(context.Context, string, string, string) (string, error)
+		CredentialCacheScope(ctx context.Context, id, scopeType, scopeID string) (string, error)
 	}); ok {
 		return resolver.CredentialCacheScope(ctx, id, scopeType, scopeID)
 	}
@@ -501,8 +571,8 @@ func (a *TwelveDataAdapter) CachedQuoteRevision(ctx context.Context, r MarketReq
 	return strconv.FormatUint(uint64(len(quotes)), 10) + ":" + fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
-func marketQuoteTTL(q MarketQuote, now time.Time) time.Duration {
-	ttl := quoteFreshTTL([]MarketQuote{q})
+func (a *TwelveDataAdapter) marketQuoteTTL(q MarketQuote, now time.Time) time.Duration {
+	ttl := a.quoteFreshTTL([]MarketQuote{q})
 	// Small weekday/session bound for known North American venues. This is not
 	// a holiday calendar: opening time merely allows a refresh to discover state.
 	if q.MIC != "XNAS" && q.MIC != "XNGS" && q.MIC != "XNMS" && q.MIC != "XNCM" && q.MIC != "XNYS" && q.MIC != "ARCX" && q.MIC != "XTSE" {
@@ -533,4 +603,8 @@ func marketQuoteTTL(q MarketQuote, now time.Time) time.Duration {
 		return next.Sub(local)
 	}
 	return ttl
+}
+
+func marketQuoteTTL(q MarketQuote, now time.Time) time.Duration {
+	return (&TwelveDataAdapter{quotaPolicy: DefaultMarketQuotaPolicy()}).marketQuoteTTL(q, now)
 }
