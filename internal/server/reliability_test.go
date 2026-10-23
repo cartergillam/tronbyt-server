@@ -425,11 +425,9 @@ func TestProductionLineageMigrationAndCleanupRehearsal(t *testing.T) {
 	require.NoError(t, legacySQL.Close())
 
 	db := openDB()
-	sqlDB, err := db.DB()
+	dbSQL, err := db.DB()
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = sqlDB.Close()
-	})
+	t.Cleanup(func() { require.NoError(t, dbSQL.Close()) })
 	require.NoError(t, db.AutoMigrate(
 		&data.User{},
 		&data.Device{},
