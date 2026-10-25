@@ -6,7 +6,7 @@ import unittest
 
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/deploy-production.yml"
-APPS_COMMIT = "0b2395e8e8a9ce071c5689e6e3b4ff8af0690a09"
+APPS_COMMIT = "a0746987a714c18632ba10169d809b51ea191cd5"
 
 
 def remote_script() -> str:
@@ -43,14 +43,37 @@ class DeploymentVolumeValidationTest(unittest.TestCase):
 
     def test_existing_deployment_guards_remain(self) -> None:
         for check in (
-            "docker compose pull web",
-            "docker compose up -d --no-deps --force-recreate web",
+            'docker pull "$image_ref"',
+            'docker compose -f docker-compose.yaml -f "$override_file" -f "$image_override" up -d --no-deps --force-recreate web',
             'health" = "healthy"',
             'status" = "running"',
             "System apps checkout ready",
             'commit=$APPS_COMMIT',
             "update_succeeded=true",
             "System apps checkout failed",
+            "deployed_image_id",
+            "NEW_IMAGE_DIGEST",
+        ):
+            self.assertIn(check, self.remote)
+
+    def test_immutable_digest_is_required_and_verified(self) -> None:
+        self.assertIn("image_digest:", self.workflow)
+        self.assertIn("sha256:acfab7dfc4abaecae4701aac33d375a1bb5ace5cbb79256882e1461d202d2001", self.workflow)
+        self.assertIn("SERVER_IMAGE_DIGEST", self.workflow)
+        self.assertIn("image_digest_ref", self.remote)
+        self.assertNotIn("docker compose pull web", self.remote)
+
+    def test_database_and_asset_backups_are_verified(self) -> None:
+        for check in (
+            "source.backup(target)",
+            "PRAGMA integrity_check",
+            "persistent-assets.tar.gz",
+            "tar -tzf",
+            "sha256sum -c SHA256SUMS",
+            "compose-resolved.yaml",
+            "current_apps_sha",
+            "device_poll_state",
+            "mode 600",
         ):
             self.assertIn(check, self.remote)
 
