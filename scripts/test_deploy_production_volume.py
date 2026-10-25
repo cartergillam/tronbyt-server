@@ -6,7 +6,7 @@ import unittest
 
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/deploy-production.yml"
-APPS_COMMIT = "a0746987a714c18632ba10169d809b51ea191cd5"
+APPS_COMMIT = "3328979fa960e6f3cc16f391b805fc4d3b58baa2"
 
 
 def remote_script() -> str:

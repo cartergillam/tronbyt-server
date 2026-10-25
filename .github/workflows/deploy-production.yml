@@ -7,7 +7,7 @@ on:
         description: Full SHA of the reviewed tronbyt-apps commit to deploy
         required: true
         type: string
-        default: a0746987a714c18632ba10169d809b51ea191cd5
+        default: 3328979fa960e6f3cc16f391b805fc4d3b58baa2
       image_digest:
         description: Approved immutable image digest (sha256)
         required: true
