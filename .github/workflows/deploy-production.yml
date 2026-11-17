@@ -7,7 +7,7 @@ on:
         description: Full SHA of the reviewed tronbyt-apps commit to deploy
         required: true
         type: string
-        default: 3328979fa960e6f3cc16f391b805fc4d3b58baa2
+        default: a0746987a714c18632ba10169d809b51ea191cd5
       image_digest:
         description: Approved immutable image digest (sha256)
         required: true
@@ -88,8 +88,10 @@ jobs:
           image_ref="$image_repo@$SERVER_IMAGE_DIGEST"
           image_override=".tronbyt-deploy-image.yaml"
           deployment_timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          deployment_id="$(date -u +%Y%m%dT%H%M%SZ)"
           old_image_id="unavailable"
           old_image_ref="unavailable"
+          rollback_image_ref="unavailable"
           new_image_id="unavailable"
           new_image_created="unavailable"
           backup_file="unavailable"
@@ -101,27 +103,30 @@ jobs:
 
           failure_summary() {
             exit_code="$1"
+            trap - EXIT ERR
             printf 'DEPLOYMENT_RESULT=failed\n'
             printf 'DEPLOYMENT_TIMESTAMP=%s\n' "$deployment_timestamp"
             printf 'APPS_COMMIT=%s\n' "$APPS_COMMIT"
             printf 'OLD_IMAGE_ID=%s\n' "$old_image_id"
             printf 'OLD_IMAGE_REF=%s\n' "$old_image_ref"
             printf 'OLD_IMAGE_DIGEST=%s\n' "$old_image_digest"
+            printf 'ROLLBACK_IMAGE_REF=%s\n' "$rollback_image_ref"
             printf 'CURRENT_APPS_SHA=%s\n' "$current_apps_sha"
             printf 'BACKUP_DIR=%s\n' "$backup_dir"
             printf 'NEW_IMAGE_ID=%s\n' "$new_image_id"
             printf 'APPS_OVERRIDE_BACKUP=%s\n' "$backup_file"
             printf 'BACKUP_DATABASE_INTEGRITY=%s\n' "$backup_database_integrity"
             printf 'BACKUP_ASSETS_SHA256=%s\n' "$backup_assets_sha256"
-            if [ "$old_image_id" != "unavailable" ] && [ "$backup_file" != "unavailable" ]; then
+            if [ "$old_image_id" != "unavailable" ] && [ "$backup_file" != "unavailable" ] && [ "$rollback_image_ref" != "unavailable" ]; then
               printf 'ROLLBACK_1=cd %s && cp -p %s %s\n' "$compose_dir" "$backup_file" "$override_file"
-              printf 'ROLLBACK_2=printf %s > .tronbyt-rollback-image.yaml\n' "'services:\\n  web:\\n    image: $old_image_id\\n'"
+              rollback_override_b64="$(printf 'services: {web: {image: "%s"}}\n' "$rollback_image_ref" | base64 -w0)"
+              printf 'ROLLBACK_2=printf %%s %q | base64 -d > .tronbyt-rollback-image.yaml\n' "$rollback_override_b64"
               printf 'ROLLBACK_3=docker compose -f docker-compose.yaml -f docker-compose.override.yaml -f .tronbyt-rollback-image.yaml up -d --no-deps --force-recreate web\n'
               printf 'ROLLBACK_4=rm -f .tronbyt-rollback-image.yaml %s\n' "$image_override"
             fi
             exit "$exit_code"
           }
-          trap 'failure_summary "$?"' ERR
+          trap 'exit_code=$?; if [ "$exit_code" -ne 0 ]; then failure_summary "$exit_code"; fi' EXIT
 
           if [[ ! "$APPS_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo 'ERROR: apps_commit was not a full Git SHA.' >&2
@@ -159,6 +164,8 @@ jobs:
           old_image_ref="$(docker inspect --format '{{.Config.Image}}' "$old_container_id")"
           old_image_digests="$(docker image inspect --format '{{json .RepoDigests}}' "$old_image_id" 2>/dev/null || echo '[]')"
           old_image_digest="$(printf '%s' "$old_image_digests" | sed -nE 's/.*@(sha256:[0-9a-f]{64}).*/\1/p' | head -1)"
+          rollback_image_ref="$image_repo:rollback-$deployment_id"
+          docker tag "$old_image_id" "$rollback_image_ref"
           current_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$old_container_id")"
           current_status="$(docker inspect --format '{{.State.Status}}' "$old_container_id")"
           if [[ "$current_health" != "healthy" || "$current_status" != "running" ]]; then
@@ -167,8 +174,10 @@ jobs:
           fi
 
           backup_root="/home/ubuntu/tronbyt/backups"
-          backup_dir="$backup_root/predeploy-$(date -u +%Y%m%dT%H%M%SZ)"
-          install -m 700 -d "$backup_root" "$backup_dir"
+          install -m 700 -d "$backup_root"
+          chmod 700 "$backup_root"
+          backup_dir="$(mktemp -d "$backup_root/predeploy-$deployment_id.XXXXXX")"
+          chmod 700 "$backup_dir"
           backup_file="$backup_dir/$override_file"
           cp -p docker-compose.yaml "$backup_dir/docker-compose.yaml"
           cp -p "$override_file" "$backup_file"
@@ -235,6 +244,7 @@ jobs:
           printf 'CURRENT_APPS_SHA=%s\n' "$current_apps_sha"
           printf 'CURRENT_IMAGE_ID=%s\n' "$old_image_id"
           printf 'CURRENT_IMAGE_DIGEST=%s\n' "$old_image_digest"
+          printf 'ROLLBACK_IMAGE_REF=%s\n' "$rollback_image_ref"
           printf 'CURRENT_CONTAINER_STATE=%s\n' "$current_status"
           printf 'CURRENT_CONTAINER_HEALTH=%s\n' "$current_health"
           printf '%s\n' "$device_poll_state"
@@ -383,7 +393,7 @@ jobs:
           {
             echo '## Tronbyt production deployment'
             echo
-            grep -E '^(DEPLOYMENT_RESULT|DEPLOYMENT_TIMESTAMP|APPS_COMMIT|OLD_IMAGE_ID|OLD_IMAGE_REF|OLD_IMAGE_DIGEST|CURRENT_APPS_SHA|CURRENT_IMAGE_ID|CURRENT_IMAGE_DIGEST|CURRENT_CONTAINER_STATE|CURRENT_CONTAINER_HEALTH|NEW_IMAGE_ID|NEW_IMAGE_DIGEST|NEW_IMAGE_REPO_DIGESTS|NEW_IMAGE_CREATED|CONTAINER_HEALTH|CONTAINER_STATUS|RESTART_COUNT|APPS_OVERRIDE_BACKUP|BACKUP_DIR|BACKUP_DATABASE_INTEGRITY|BACKUP_DATABASE_SHA256|BACKUP_ASSETS_SHA256|ROLLBACK_)=' "$remote_report" || true
+            grep -E '^(DEPLOYMENT_RESULT|DEPLOYMENT_TIMESTAMP|APPS_COMMIT|OLD_IMAGE_ID|OLD_IMAGE_REF|OLD_IMAGE_DIGEST|ROLLBACK_IMAGE_REF|CURRENT_APPS_SHA|CURRENT_IMAGE_ID|CURRENT_IMAGE_DIGEST|CURRENT_CONTAINER_STATE|CURRENT_CONTAINER_HEALTH|NEW_IMAGE_ID|NEW_IMAGE_DIGEST|NEW_IMAGE_REPO_DIGESTS|NEW_IMAGE_CREATED|CONTAINER_HEALTH|CONTAINER_STATUS|RESTART_COUNT|APPS_OVERRIDE_BACKUP|BACKUP_DIR|BACKUP_DATABASE_INTEGRITY|BACKUP_DATABASE_SHA256|BACKUP_ASSETS_SHA256|ROLLBACK_)=' "$remote_report" || true
             echo
             if [ "$ssh_status" -eq 0 ]; then
               echo 'Result: deployment completed successfully.'

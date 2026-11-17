@@ -6,7 +6,7 @@ import unittest
 
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/deploy-production.yml"
-APPS_COMMIT = "3328979fa960e6f3cc16f391b805fc4d3b58baa2"
+APPS_COMMIT = "a0746987a714c18632ba10169d809b51ea191cd5"
 
 
 def remote_script() -> str:
@@ -76,6 +76,19 @@ class DeploymentVolumeValidationTest(unittest.TestCase):
             "mode 600",
         ):
             self.assertIn(check, self.remote)
+
+    def test_backup_paths_are_unique_and_rollback_uses_preserved_image_tag(self) -> None:
+        self.assertIn('mktemp -d "$backup_root/predeploy-$deployment_id.XXXXXX"', self.remote)
+        self.assertIn('docker tag "$old_image_id" "$rollback_image_ref"', self.remote)
+        self.assertIn('rollback_image_ref="$image_repo:rollback-$deployment_id"', self.remote)
+        self.assertIn("ROLLBACK_IMAGE_REF", self.remote)
+        self.assertIn("trap 'exit_code=$?; if [ \"$exit_code\" -ne 0 ]; then failure_summary \"$exit_code\"; fi' EXIT", self.remote)
+        self.assertIn("cp -p %s %s", self.remote)
+        self.assertIn(".tronbyt-rollback-image.yaml", self.remote)
+        self.assertNotIn('image: $old_image_id', self.remote)
+
+    def test_apps_revision_default_is_the_approved_reviewed_commit(self) -> None:
+        self.assertIn(f"default: {APPS_COMMIT}", self.workflow)
 
 
 if __name__ == "__main__":
