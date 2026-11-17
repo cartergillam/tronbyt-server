@@ -13,6 +13,11 @@ on:
         required: true
         type: string
         default: sha256:acfab7dfc4abaecae4701aac33d375a1bb5ace5cbb79256882e1461d202d2001
+      diagnostics_only:
+        description: Run read-only device and server diagnostics without deploying or creating a backup
+        required: true
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -30,6 +35,7 @@ jobs:
     env:
       APPS_COMMIT: ${{ inputs.apps_commit }}
       SERVER_IMAGE_DIGEST: ${{ inputs.image_digest }}
+      DIAGNOSTICS_ONLY: ${{ inputs.diagnostics_only }}
       ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
       ORACLE_USER: ${{ secrets.ORACLE_USER }}
       ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
@@ -78,7 +84,7 @@ jobs:
             -o LogLevel=ERROR \
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$ssh_dir/known_hosts" \
-            "$ORACLE_USER@$ORACLE_HOST" "APPS_COMMIT='$APPS_COMMIT' SERVER_IMAGE_DIGEST='$SERVER_IMAGE_DIGEST' bash -s" > "$remote_report" 2>&1 <<'REMOTE'
+            "$ORACLE_USER@$ORACLE_HOST" "APPS_COMMIT='$APPS_COMMIT' SERVER_IMAGE_DIGEST='$SERVER_IMAGE_DIGEST' DIAGNOSTICS_ONLY='$DIAGNOSTICS_ONLY' bash -s" > "$remote_report" 2>&1 <<'REMOTE'
           set -Eeuo pipefail
           set +x
 
@@ -139,15 +145,41 @@ jobs:
           test -f "$override_file"
           # Refuse a deployment that would cause server startup to bootstrap an
           # apps checkout. This workflow never clones or pulls the apps repo.
-          old_container_id="$(docker compose ps -q web)"
-          test -n "$old_container_id"
+          if [[ "$DIAGNOSTICS_ONLY" == "true" ]]; then
+            old_container_id="$(docker compose ps -aq web | head -n 1)"
+          else
+            old_container_id="$(docker compose ps -q web)"
+          fi
+          if [ -z "$old_container_id" ]; then
+            if [[ "$DIAGNOSTICS_ONLY" == "true" ]]; then
+              printf 'DIAGNOSTICS_RESULT=complete\n'
+              printf 'CONTAINER_PRESENT=false\n'
+              printf 'CONTAINER_HEALTH=missing\n'
+              printf 'CONTAINER_STATUS=missing\n'
+              exit 0
+            fi
+            echo 'ERROR: no running web container is available for deployment preflight.' >&2
+            exit 1
+          fi
           data_mount_info="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{printf "%s\t%s\n" .Type .Source}}{{end}}{{end}}' "$old_container_id")"
           if [[ -z "$data_mount_info" || "$data_mount_info" == *$'\n'* || "$data_mount_info" != *$'\t'* ]]; then
+            if [[ "$DIAGNOSTICS_ONLY" == "true" ]]; then
+              printf 'DIAGNOSTICS_RESULT=complete\n'
+              printf 'CONTAINER_PRESENT=true\n'
+              printf 'DATA_MOUNT_STATUS=missing_or_ambiguous\n'
+              exit 0
+            fi
             echo 'ERROR: expected exactly one Docker mount at /app/data.' >&2
             exit 1
           fi
           IFS=$'\t' read -r data_mount_type data_dir <<< "$data_mount_info"
           if [[ "$data_mount_type" != "volume" || -z "$data_dir" ]]; then
+            if [[ "$DIAGNOSTICS_ONLY" == "true" ]]; then
+              printf 'DIAGNOSTICS_RESULT=complete\n'
+              printf 'CONTAINER_PRESENT=true\n'
+              printf 'DATA_MOUNT_STATUS=not_a_named_volume\n'
+              exit 0
+            fi
             echo 'ERROR: /app/data is not backed by a Docker named volume.' >&2
             exit 1
           fi
@@ -164,10 +196,111 @@ jobs:
           old_image_ref="$(docker inspect --format '{{.Config.Image}}' "$old_container_id")"
           old_image_digests="$(docker image inspect --format '{{json .RepoDigests}}' "$old_image_id" 2>/dev/null || echo '[]')"
           old_image_digest="$(printf '%s' "$old_image_digests" | sed -nE 's/.*@(sha256:[0-9a-f]{64}).*/\1/p' | head -1)"
-          rollback_image_ref="$image_repo:rollback-$deployment_id"
-          docker tag "$old_image_id" "$rollback_image_ref"
           current_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$old_container_id")"
           current_status="$(docker inspect --format '{{.State.Status}}' "$old_container_id")"
+          current_restart_count="$(docker inspect --format '{{.RestartCount}}' "$old_container_id")"
+          current_started_at="$(docker inspect --format '{{.State.StartedAt}}' "$old_container_id")"
+
+          if [[ "$DIAGNOSTICS_ONLY" == "true" ]]; then
+            printf 'DIAGNOSTICS_RESULT=complete\n'
+            printf 'DIAGNOSTICS_TIMESTAMP=%s\n' "$deployment_timestamp"
+            printf 'CONTAINER_PRESENT=true\n'
+            printf 'CURRENT_IMAGE_ID=%s\n' "$old_image_id"
+            printf 'CURRENT_IMAGE_REF=%s\n' "$old_image_ref"
+            printf 'CURRENT_IMAGE_DIGEST=%s\n' "$old_image_digest"
+            printf 'CONTAINER_HEALTH=%s\n' "$current_health"
+            printf 'CONTAINER_STATUS=%s\n' "$current_status"
+            printf 'CONTAINER_RESTART_COUNT=%s\n' "$current_restart_count"
+            printf 'CONTAINER_STARTED_AT=%s\n' "$current_started_at"
+            printf 'CURRENT_APPS_SHA=%s\n' "$current_apps_sha"
+            printf 'DATA_MOUNT_TYPE=%s\n' "$data_mount_type"
+            printf 'DATA_MOUNT_SOURCE=%s\n' "$data_dir"
+            printf 'COMPOSE_SHA256=%s\n' "$(sha256sum docker-compose.yaml | cut -d' ' -f1)"
+            printf 'OVERRIDE_SHA256=%s\n' "$(sha256sum "$override_file" | cut -d' ' -f1)"
+            docker stats --no-stream --format 'RESOURCE_CONTAINER={{.Name}} CPU={{.CPUPerc}} MEMORY={{.MemUsage}}' "$old_container_id" 2>/dev/null || true
+            sudo python3 - "$data_dir/tronbyt.db" "$data_dir/webp" <<'PY'
+          import os
+          import sqlite3
+          import sys
+          from datetime import datetime, timezone
+
+          database, webp_root = sys.argv[1:]
+          db = sqlite3.connect("file:" + database + "?mode=ro", uri=True)
+          db.execute("PRAGMA query_only=ON")
+          for device_id, last_seen in db.execute(
+              "SELECT id, last_seen FROM devices WHERE id IN (?, ?)",
+              ("ben-frame", "carter-frame"),
+          ):
+              print(f"{device_id}_LAST_SEEN={last_seen or 'never'}")
+              device_dir = os.path.join(webp_root, device_id)
+              frames = []
+              for root, _, names in os.walk(device_dir):
+                  for name in names:
+                      if name.lower().endswith(".webp"):
+                          path = os.path.join(root, name)
+                          try:
+                              info = os.stat(path, follow_symlinks=False)
+                              frames.append((info.st_mtime, info.st_size, name))
+                          except OSError:
+                              pass
+              frames.sort(reverse=True)
+              if frames:
+                  timestamp, size, filename = frames[0]
+                  when = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+                  print(f"{device_id}_LATEST_FRAME_UTC={when}")
+                  print(f"{device_id}_LATEST_FRAME_BYTES={size}")
+                  print(f"{device_id}_LATEST_FRAME_NAME={filename[:100]}")
+                  print(f"{device_id}_FRAME_FILE_COUNT={len(frames)}")
+              else:
+                  print(f"{device_id}_LATEST_FRAME_UTC=none")
+                  print(f"{device_id}_FRAME_FILE_COUNT=0")
+          db.close()
+          PY
+            python3 - "$old_container_id" <<'PY'
+          import re
+          import subprocess
+          import sys
+
+          devices = ("ben-frame", "carter-frame")
+          categories = ("auth", "poll_or_image", "error")
+          stats = {device: {category: [0, "none"] for category in categories} for device in devices}
+          process = subprocess.Popen(
+              ["docker", "logs", "--since", "30d", "--timestamps", sys.argv[1]],
+              stdout=subprocess.PIPE,
+              stderr=subprocess.DEVNULL,
+              text=True,
+              errors="replace",
+          )
+          if process.stdout is not None:
+              for line in process.stdout:
+                  lowered = line.lower()
+                  timestamp_match = re.match(r"^(\S+)", line)
+                  timestamp = timestamp_match.group(1) if timestamp_match else "unknown"
+                  for device in devices:
+                      if device not in lowered:
+                          continue
+                      matched = []
+                      if any(word in lowered for word in ("auth", "unauthorized", "forbidden", "api key")):
+                          matched.append("auth")
+                      if any(word in lowered for word in ("poll", "frame", "image", "heartbeat")):
+                          matched.append("poll_or_image")
+                      if any(word in lowered for word in ("error", "failed", "failure", "panic")):
+                          matched.append("error")
+                      for category in matched:
+                          stats[device][category][0] += 1
+                          stats[device][category][1] = timestamp
+          process.wait()
+          for device in devices:
+              for category in categories:
+                  count, latest = stats[device][category]
+                  print(f"{device}_LOG_{category.upper()}_COUNT={count}")
+                  print(f"{device}_LOG_{category.upper()}_LATEST_UTC={latest}")
+          PY
+            exit 0
+          fi
+
+          rollback_image_ref="$image_repo:rollback-$deployment_id"
+          docker tag "$old_image_id" "$rollback_image_ref"
           if [[ "$current_health" != "healthy" || "$current_status" != "running" ]]; then
             echo "ERROR: current web container is not healthy and running." >&2
             exit 1
@@ -393,7 +526,7 @@ jobs:
           {
             echo '## Tronbyt production deployment'
             echo
-            grep -E '^(DEPLOYMENT_RESULT|DEPLOYMENT_TIMESTAMP|APPS_COMMIT|OLD_IMAGE_ID|OLD_IMAGE_REF|OLD_IMAGE_DIGEST|ROLLBACK_IMAGE_REF|CURRENT_APPS_SHA|CURRENT_IMAGE_ID|CURRENT_IMAGE_DIGEST|CURRENT_CONTAINER_STATE|CURRENT_CONTAINER_HEALTH|NEW_IMAGE_ID|NEW_IMAGE_DIGEST|NEW_IMAGE_REPO_DIGESTS|NEW_IMAGE_CREATED|CONTAINER_HEALTH|CONTAINER_STATUS|RESTART_COUNT|APPS_OVERRIDE_BACKUP|BACKUP_DIR|BACKUP_DATABASE_INTEGRITY|BACKUP_DATABASE_SHA256|BACKUP_ASSETS_SHA256|ROLLBACK_)=' "$remote_report" || true
+            grep -E '^(DEPLOYMENT_RESULT|DIAGNOSTICS_RESULT|DIAGNOSTICS_TIMESTAMP|CONTAINER_PRESENT|DATA_MOUNT_STATUS|DATA_MOUNT_TYPE|DATA_MOUNT_SOURCE|COMPOSE_SHA256|OVERRIDE_SHA256|RESOURCE_CONTAINER|ben-frame_|carter-frame_|APPS_COMMIT|OLD_IMAGE_ID|OLD_IMAGE_REF|OLD_IMAGE_DIGEST|ROLLBACK_IMAGE_REF|CURRENT_APPS_SHA|CURRENT_IMAGE_ID|CURRENT_IMAGE_REF|CURRENT_IMAGE_DIGEST|CURRENT_CONTAINER_STATE|CURRENT_CONTAINER_HEALTH|NEW_IMAGE_ID|NEW_IMAGE_DIGEST|NEW_IMAGE_REPO_DIGESTS|NEW_IMAGE_CREATED|CONTAINER_HEALTH|CONTAINER_STATUS|RESTART_COUNT|APPS_OVERRIDE_BACKUP|BACKUP_DIR|BACKUP_DATABASE_INTEGRITY|BACKUP_DATABASE_SHA256|BACKUP_ASSETS_SHA256|ROLLBACK_)=' "$remote_report" || true
             echo
             if [ "$ssh_status" -eq 0 ]; then
               echo 'Result: deployment completed successfully.'

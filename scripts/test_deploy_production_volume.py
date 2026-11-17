@@ -2,6 +2,8 @@
 """Static checks for production deployment's mounted Apps checkout discovery."""
 
 from pathlib import Path
+import ast
+import textwrap
 import unittest
 
 
@@ -89,6 +91,52 @@ class DeploymentVolumeValidationTest(unittest.TestCase):
 
     def test_apps_revision_default_is_the_approved_reviewed_commit(self) -> None:
         self.assertIn(f"default: {APPS_COMMIT}", self.workflow)
+
+    def test_read_only_diagnostics_default_to_safe_mode(self) -> None:
+        self.assertIn("diagnostics_only:", self.workflow)
+        self.assertIn("type: boolean", self.workflow)
+        self.assertIn("default: true", self.workflow)
+        self.assertIn("DIAGNOSTICS_ONLY: ${{ inputs.diagnostics_only }}", self.workflow)
+
+    def test_diagnostics_exit_before_deployment_mutations(self) -> None:
+        diagnostics = self.remote.index(
+            'if [[ "$DIAGNOSTICS_ONLY" == "true" ]]; then',
+            self.remote.index('current_started_at="$(docker'),
+        )
+        exit_read_only = self.remote.index("            exit 0", diagnostics)
+        for mutation in (
+            'docker tag "$old_image_id"',
+            'backup_root="/home/ubuntu/tronbyt/backups"',
+            'docker pull "$image_ref"',
+            'os.replace(temporary, path)',
+            ' up -d --no-deps --force-recreate web',
+        ):
+            self.assertGreater(self.remote.rindex(mutation), exit_read_only)
+
+    def test_diagnostics_report_device_state_without_raw_logs(self) -> None:
+        for field in (
+            'SELECT id, last_seen FROM devices',
+            'LATEST_FRAME_UTC',
+            'FRAME_FILE_COUNT',
+            'LOG_{category.upper()}_COUNT',
+            'docker", "logs", "--since", "30d", "--timestamps", sys.argv[1]',
+        ):
+            self.assertIn(field, self.remote)
+        self.assertNotIn('print(line)', self.remote)
+        self.assertNotIn('printf "%s\\n" "$startup_logs"', self.remote)
+
+    def test_diagnostics_python_blocks_are_syntactically_valid(self) -> None:
+        cursor = 0
+        while True:
+            start = self.remote.find("<<'PY'\n", cursor)
+            if start < 0:
+                break
+            start += len("<<'PY'\n")
+            end = self.remote.find("\n          PY", start)
+            self.assertNotEqual(end, -1, "unterminated Python heredoc")
+            source = textwrap.dedent(self.remote[start:end])
+            ast.parse(source)
+            cursor = end + len("\n          PY")
 
 
 if __name__ == "__main__":
