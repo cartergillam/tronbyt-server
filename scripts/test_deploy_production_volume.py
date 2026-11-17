@@ -138,6 +138,33 @@ class DeploymentVolumeValidationTest(unittest.TestCase):
             ast.parse(source)
             cursor = end + len("\n          PY")
 
+    def test_rollback_mode_requires_exact_verified_inputs_and_restores_preserved_state(self) -> None:
+        for check in (
+            "rollback_only:",
+            "rollback_backup_dir:",
+            "rollback_image_ref:",
+            "rollback_expected_image_id:",
+            "rollback_apps_commit:",
+            "rollback_only and diagnostics_only cannot both be true.",
+            'sha256sum -c SHA256SUMS',
+            "PRAGMA integrity_check",
+            'docker image inspect --format \'{{.Id}}\' "$ROLLBACK_IMAGE_REF"',
+            'mv -f "$override_file.rollback-tmp" "$override_file"',
+            'up -d --no-deps --force-recreate web',
+            "System apps checkout ready",
+            "ROLLBACK_RESULT=success",
+        ):
+            self.assertIn(check, self.workflow + self.remote)
+
+        rollback = self.remote.index('if [[ "$ROLLBACK_ONLY" == "true" ]]; then')
+        rollback_exit = self.remote.index("            exit 0", rollback)
+        self.assertLess(rollback, rollback_exit)
+        for deployment_action in (
+            'docker pull "$image_ref"',
+            'backup_root="/home/ubuntu/tronbyt/backups"',
+        ):
+            self.assertGreater(self.remote.index(deployment_action), rollback_exit)
+
 
 if __name__ == "__main__":
     unittest.main()
