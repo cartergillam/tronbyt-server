@@ -2,6 +2,8 @@
 """Static checks for production deployment's mounted Apps checkout discovery."""
 
 from pathlib import Path
+import ast
+import textwrap
 import unittest
 
 
@@ -89,6 +91,79 @@ class DeploymentVolumeValidationTest(unittest.TestCase):
 
     def test_apps_revision_default_is_the_approved_reviewed_commit(self) -> None:
         self.assertIn(f"default: {APPS_COMMIT}", self.workflow)
+
+    def test_read_only_diagnostics_default_to_safe_mode(self) -> None:
+        self.assertIn("diagnostics_only:", self.workflow)
+        self.assertIn("type: boolean", self.workflow)
+        self.assertIn("default: true", self.workflow)
+        self.assertIn("DIAGNOSTICS_ONLY: ${{ inputs.diagnostics_only }}", self.workflow)
+
+    def test_diagnostics_exit_before_deployment_mutations(self) -> None:
+        diagnostics = self.remote.index(
+            'if [[ "$DIAGNOSTICS_ONLY" == "true" ]]; then',
+            self.remote.index('current_started_at="$(docker'),
+        )
+        exit_read_only = self.remote.index("            exit 0", diagnostics)
+        for mutation in (
+            'docker tag "$old_image_id"',
+            'backup_root="/home/ubuntu/tronbyt/backups"',
+            'docker pull "$image_ref"',
+            'os.replace(temporary, path)',
+            ' up -d --no-deps --force-recreate web',
+        ):
+            self.assertGreater(self.remote.rindex(mutation), exit_read_only)
+
+    def test_diagnostics_report_device_state_without_raw_logs(self) -> None:
+        for field in (
+            'SELECT id, last_seen FROM devices',
+            'LATEST_FRAME_UTC',
+            'FRAME_FILE_COUNT',
+            'LOG_{category.upper()}_COUNT',
+            'docker", "logs", "--since", "30d", "--timestamps", sys.argv[1]',
+        ):
+            self.assertIn(field, self.remote)
+        self.assertNotIn('print(line)', self.remote)
+        self.assertNotIn('printf "%s\\n" "$startup_logs"', self.remote)
+
+    def test_diagnostics_python_blocks_are_syntactically_valid(self) -> None:
+        cursor = 0
+        while True:
+            start = self.remote.find("<<'PY'\n", cursor)
+            if start < 0:
+                break
+            start += len("<<'PY'\n")
+            end = self.remote.find("\n          PY", start)
+            self.assertNotEqual(end, -1, "unterminated Python heredoc")
+            source = textwrap.dedent(self.remote[start:end])
+            ast.parse(source)
+            cursor = end + len("\n          PY")
+
+    def test_rollback_mode_requires_exact_verified_inputs_and_restores_preserved_state(self) -> None:
+        for check in (
+            "rollback_only:",
+            "rollback_backup_dir:",
+            "rollback_image_ref:",
+            "rollback_expected_image_id:",
+            "rollback_apps_commit:",
+            "rollback_only and diagnostics_only cannot both be true.",
+            'sha256sum -c SHA256SUMS',
+            "PRAGMA integrity_check",
+            'docker image inspect --format \'{{.Id}}\' "$ROLLBACK_IMAGE_REF"',
+            'mv -f "$override_file.rollback-tmp" "$override_file"',
+            'up -d --no-deps --force-recreate web',
+            "System apps checkout ready",
+            "ROLLBACK_RESULT=success",
+        ):
+            self.assertIn(check, self.workflow + self.remote)
+
+        rollback = self.remote.index('if [[ "$ROLLBACK_ONLY" == "true" ]]; then')
+        rollback_exit = self.remote.index("            exit 0", rollback)
+        self.assertLess(rollback, rollback_exit)
+        for deployment_action in (
+            'docker pull "$image_ref"',
+            'backup_root="/home/ubuntu/tronbyt/backups"',
+        ):
+            self.assertGreater(self.remote.index(deployment_action), rollback_exit)
 
 
 if __name__ == "__main__":
